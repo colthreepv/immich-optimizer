@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -22,6 +23,8 @@ import (
 )
 
 const provenanceKey = "storage-saver-source"
+
+var errDuplicateInTrash = errors.New("matching Immich asset is trashed")
 
 type storageSaver struct {
 	store       *state.Store
@@ -82,6 +85,61 @@ func (s *Server) owner(r *http.Request) (string, error) {
 	return user.ID, nil
 }
 
+// checkOriginalDuplicate asks Immich whether the authenticated owner already
+// has the original bytes. This must run before conversion so a stock mobile
+// client's existing JPEG is not converted or uploaded again.
+func (s *Server) checkOriginalDuplicate(r *http.Request, sourceSHA1 string) (string, error) {
+	body := fmt.Sprintf(`{"assets":[{"id":%q,"checksum":%q}]}`, sourceSHA1, sourceSHA1)
+	req, err := s.upstreamRequest(r, http.MethodPost, "/api/assets/bulk-upload-check", strings.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("bulk upload check: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return "", fmt.Errorf("read bulk upload check response: %w", err)
+	}
+	if len(data) > 1<<20 {
+		return "", errors.New("bulk upload check response exceeds limit")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("bulk upload check HTTP %d", resp.StatusCode)
+	}
+	results, err := mobileview.ParseBulkUploadCheckResponse(data)
+	if err != nil {
+		return "", fmt.Errorf("invalid bulk upload check response: %w", err)
+	}
+	if len(results) != 1 {
+		return "", fmt.Errorf("bulk upload check returned %d results, want 1", len(results))
+	}
+	result := results[0]
+	if result.ID != sourceSHA1 {
+		return "", fmt.Errorf("bulk upload check returned unrelated asset ID %q", result.ID)
+	}
+	switch result.Action {
+	case "accept":
+		return "", nil
+	case "reject":
+		if result.Reason != "duplicate" || result.AssetID == "" {
+			return "", fmt.Errorf("bulk upload check rejected the original without a reusable duplicate")
+		}
+		if result.IsTrashed == nil {
+			return "", errors.New("bulk upload check omitted duplicate trash state")
+		}
+		if *result.IsTrashed {
+			return "", fmt.Errorf("%w (asset %s); restore or remove it before retrying", errDuplicateInTrash, result.AssetID)
+		}
+		return result.AssetID, nil
+	default:
+		return "", fmt.Errorf("bulk upload check returned unsupported action %q", result.Action)
+	}
+}
+
 func fileSHA1(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -140,6 +198,10 @@ func (s *Server) serveVerifiedUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if err = s.verifiedUpload(w, r, owner); err != nil {
 		s.logger.Printf("Verified ingestion failed: %v", err)
+		if errors.Is(err, errDuplicateInTrash) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "Upload not acknowledged; staged source retained for retry", http.StatusBadGateway)
 	}
 }
@@ -195,6 +257,35 @@ func (s *Server) verifiedUpload(w http.ResponseWriter, r *http.Request, owner st
 		}
 		// Do not silently overwrite aliases after deletion or a server integrity failure.
 		return fmt.Errorf("previously recorded asset unavailable; reconcile before retry")
+	}
+	duplicateID, err := s.checkOriginalDuplicate(r, sourceHash)
+	if err != nil {
+		return err
+	}
+	if duplicateID != "" {
+		filename := filepath.Base(header.Filename)
+		identity := state.Record{
+			OwnerID:        owner,
+			AssetID:        duplicateID,
+			SourceSHA1:     sourceHash,
+			OutputSHA1:     sourceHash,
+			SourceFilename: filename,
+			OutputFilename: filename,
+			Preset:         "identity",
+			State:          "verified",
+			SourceSize:     n,
+			OutputSize:     n,
+			UpdatedAt:      time.Now().UTC(),
+		}
+		if err = s.verifyRemote(r, identity); err != nil {
+			return fmt.Errorf("verify existing duplicate: %w", err)
+		}
+		if err = s.saver.store.Put(identity); err != nil {
+			return err
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return json.NewEncoder(w).Encode(map[string]string{"id": duplicateID, "status": "duplicate"})
 	}
 	if err = durableCopy(tmpPath, src); err != nil {
 		return err

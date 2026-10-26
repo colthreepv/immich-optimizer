@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -26,6 +27,9 @@ func TestVerifiedIngestionRetryAndRestart(t *testing.T) {
 			var uploaded []byte
 			var meta json.RawMessage
 			uploads, converts := 0, 0
+			sourceBytes := bytes.Repeat([]byte("x"), 100)
+			h := sha1.Sum(sourceBytes)
+			sourceDigest := hex.EncodeToString(h[:])
 			fail := failure
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("x-api-key") != "valid" {
@@ -35,6 +39,17 @@ func TestVerifiedIngestionRetryAndRestart(t *testing.T) {
 				switch {
 				case r.URL.Path == "/api/users/me":
 					io.WriteString(w, `{"id":"owner"}`)
+				case r.Method == "POST" && r.URL.Path == "/api/assets/bulk-upload-check":
+					data, _ := io.ReadAll(r.Body)
+					want := fmt.Sprintf(`{"assets":[{"id":%q,"checksum":%q}]}`, sourceDigest, sourceDigest)
+					if string(data) != want {
+						t.Errorf("bulk check body = %s, want %s", data, want)
+					}
+					if r.Header.Get("x-api-key") != "valid" {
+						t.Error("bulk check did not forward user credentials")
+					}
+					w.Header().Set("Content-Type", "application/json")
+					io.WriteString(w, `{"results":[{"id":"`+sourceDigest+`","action":"accept"}]}`)
 				case r.Method == "POST" && r.URL.Path == "/api/assets":
 					if r.Header.Get("x-immich-checksum") != "" {
 						t.Error("forwarded obsolete source checksum")
@@ -102,7 +117,7 @@ func TestVerifiedIngestionRetryAndRestart(t *testing.T) {
 				var b bytes.Buffer
 				mw := multipart.NewWriter(&b)
 				p, _ := mw.CreateFormFile("assetData", "photo.jpg")
-				p.Write(bytes.Repeat([]byte("x"), 100))
+				p.Write(sourceBytes)
 				mw.WriteField("fileCreatedAt", "2020-01-02T03:04:05Z")
 				mw.Close()
 				r := httptest.NewRequest("POST", "/api/assets", &b)
@@ -144,7 +159,6 @@ func TestVerifiedIngestionRetryAndRestart(t *testing.T) {
 			if uploads != before {
 				t.Fatal("reuploaded verified asset")
 			}
-			h := sha1.Sum(bytes.Repeat([]byte("x"), 100))
 			ledger, e := state.Open(dir)
 			if e != nil {
 				t.Fatal(e)
