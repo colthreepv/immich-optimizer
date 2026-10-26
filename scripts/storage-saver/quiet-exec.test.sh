@@ -17,7 +17,7 @@ quiet_exec=${QUIET_EXEC_BIN:-$script_dir/quiet-exec}
 
 mkdir -p "$test_dir/sys/hwmon0"
 printf 'it8613_rpm\n' > "$test_dir/sys/hwmon0/name"
-printf '3500\n' > "$test_dir/sys/hwmon0/fan1_input"
+printf '1000\n' > "$test_dir/sys/hwmon0/fan1_input"
 
 cat > "$test_dir/fake-child" <<'EOF'
 #!/usr/bin/env bash
@@ -50,6 +50,7 @@ for _ in {1..40}; do
 done
 [[ -s $counter ]] || { echo "fake child did not start" >&2; exit 1; }
 
+printf '3500\n' > "$test_dir/sys/hwmon0/fan1_input"
 sleep 0.4
 paused_count=$(wc -c < "$counter")
 sleep 0.3
@@ -79,10 +80,47 @@ mkdir -p "$test_dir/empty-sys"
 set +e
 QUIET_EXEC_SENSOR_ENABLED=1 \
 QUIET_EXEC_SENSOR_ROOT="$test_dir/empty-sys" \
+QUIET_EXEC_SENSOR_UNAVAILABLE_SECONDS=1 \
     "$quiet_exec" /bin/true >/dev/null 2>&1
 missing_status=$?
 set -e
 [[ $missing_status -ne 0 ]] || { echo "missing sensor did not fail closed" >&2; exit 1; }
+
+mkdir -p "$test_dir/transient-sys/hwmon0"
+printf 'it8613_rpm\n' > "$test_dir/transient-sys/hwmon0/name"
+printf '1000\n' > "$test_dir/transient-sys/hwmon0/fan1_input"
+transient_counter="$test_dir/transient-counter"
+transient_marker="$test_dir/transient-child-terminated"
+QUIET_EXEC_SENSOR_ENABLED=1 \
+QUIET_EXEC_SENSOR_ROOT="$test_dir/transient-sys" \
+QUIET_EXEC_SENSOR_UNAVAILABLE_SECONDS=3 \
+QUIET_EXEC_POLL_SECONDS=0.05 \
+QUIET_EXEC_RESUME_SECONDS=1 \
+QUIET_EXEC_TERM_GRACE_SECONDS=1 \
+    "$quiet_exec" "$test_dir/fake-child" "$transient_counter" "$transient_marker" &
+transient_pid=$!
+cleanup_pid=$transient_pid
+for _ in {1..40}; do
+    [[ -s $transient_counter ]] && break
+    sleep 0.05
+done
+[[ -s $transient_counter ]] || { echo "transient test child did not start" >&2; exit 1; }
+
+rm -f "$test_dir/transient-sys/hwmon0/fan1_input"
+sleep 0.3
+transient_paused=$(wc -c < "$transient_counter")
+sleep 0.3
+[[ $(wc -c < "$transient_counter") -eq $transient_paused ]] || { echo "child did not pause during transient sensor loss" >&2; exit 1; }
+printf '1000\n' > "$test_dir/transient-sys/hwmon0/fan1_input"
+sleep 1.4
+[[ $(wc -c < "$transient_counter") -gt $transient_paused ]] || { echo "child did not resume after transient sensor recovery" >&2; exit 1; }
+kill -TERM "$transient_pid"
+set +e
+wait "$transient_pid"
+transient_status=$?
+set -e
+cleanup_pid=""
+[[ $transient_status -eq 143 ]] || { echo "transient test SIGTERM status was $transient_status" >&2; exit 1; }
 
 QUIET_EXEC_SENSOR_ENABLED=0 \
     "$quiet_exec" /bin/sh -c 'printf "ok\n" > "$1"' _ "$test_dir/disabled-ok"

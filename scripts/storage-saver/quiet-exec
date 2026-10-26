@@ -8,6 +8,7 @@ child_status=0
 shutdown_code=0
 timeout_hit=0
 resume_since=""
+sensor_unavailable_since=""
 sensor_path=""
 paused=0
 
@@ -39,12 +40,14 @@ resume_seconds=${QUIET_EXEC_RESUME_SECONDS:-60}
 poll_seconds=${QUIET_EXEC_POLL_SECONDS:-2}
 term_grace_seconds=${QUIET_EXEC_TERM_GRACE_SECONDS:-10}
 timeout_seconds=${QUIET_EXEC_TIMEOUT_SECONDS:-}
+sensor_unavailable_seconds=${QUIET_EXEC_SENSOR_UNAVAILABLE_SECONDS:-30}
 
 is_number "$pause_rpm" || fail "QUIET_EXEC_PAUSE_RPM must be a non-negative number"
 is_number "$resume_rpm" || fail "QUIET_EXEC_RESUME_RPM must be a non-negative number"
 is_number "$resume_seconds" || fail "QUIET_EXEC_RESUME_SECONDS must be a non-negative number"
 is_number "$poll_seconds" || fail "QUIET_EXEC_POLL_SECONDS must be a positive number"
 is_uint "$term_grace_seconds" || fail "QUIET_EXEC_TERM_GRACE_SECONDS must be a non-negative integer"
+is_number "$sensor_unavailable_seconds" || fail "QUIET_EXEC_SENSOR_UNAVAILABLE_SECONDS must be a non-negative number"
 
 if awk -v poll="$poll_seconds" 'BEGIN { exit !(poll > 0) }'; then
     :
@@ -89,7 +92,7 @@ find_sensor_input() {
 
 read_rpm() {
     local value
-    IFS= read -r value < "$sensor_path" || return 1
+    value=$(cat -- "$sensor_path" 2>/dev/null) || return 1
     is_uint "$value" || return 1
     printf '%s\n' "$value"
 }
@@ -154,7 +157,21 @@ trap 'shutdown_code=143' TERM
 trap 'shutdown_code=130' INT
 
 if (( sensor_enabled )); then
-    sensor_path=$(find_sensor_input) || fail "sensor '$sensor_name' with an rpm/fan input was not found below '$sensor_root'"
+    sensor_wait_started=$SECONDS
+    sensor_wait_logged=0
+    until sensor_path=$(find_sensor_input); do
+        if (( shutdown_code != 0 )); then
+            exit "$shutdown_code"
+        fi
+        if awk -v elapsed="$((SECONDS - sensor_wait_started))" -v limit="$sensor_unavailable_seconds" 'BEGIN { exit !(elapsed >= limit) }'; then
+            fail "sensor '$sensor_name' with an rpm/fan input was unavailable for ${sensor_unavailable_seconds}s below '$sensor_root'"
+        fi
+        if (( ! sensor_wait_logged )); then
+            printf '%s: waiting for sensor %s below %s; conversions remain paused\n' "$SCRIPT_NAME" "$sensor_name" "$sensor_root" >&2
+            sensor_wait_logged=1
+        fi
+        sleep "$poll_seconds" || true
+    done
 fi
 
 setsid --wait "$@" &
@@ -183,27 +200,44 @@ while :; do
 
     if (( sensor_enabled )); then
         if ! rpm=$(read_rpm); then
-            printf '%s: unable to read sensor %s; failing closed\n' "$SCRIPT_NAME" "$sensor_path" >&2
-            terminate_group
-            exit 1
-        fi
-
-        if (( paused )); then
-            if awk -v rpm="$rpm" -v resume="$resume_rpm" 'BEGIN { exit !(rpm < resume) }'; then
-                if [[ -z $resume_since ]]; then
-                    resume_since=$SECONDS
-                elif awk -v elapsed="$((SECONDS - resume_since))" -v needed="$resume_seconds" 'BEGIN { exit !(elapsed >= needed) }'; then
-                    send_group_signal CONT
-                    paused=0
+            if [[ -z $sensor_unavailable_since ]]; then
+                sensor_unavailable_since=$SECONDS
+                if (( ! paused )); then
+                    send_group_signal STOP
+                    paused=1
                     resume_since=""
                 fi
-            else
-                resume_since=""
+                printf '%s: unable to read sensor %s; encoder paused, retrying for up to %ss\n' "$SCRIPT_NAME" "$sensor_path" "$sensor_unavailable_seconds" >&2
+            elif awk -v elapsed="$((SECONDS - sensor_unavailable_since))" -v limit="$sensor_unavailable_seconds" 'BEGIN { exit !(elapsed >= limit) }'; then
+                printf '%s: sensor %s unavailable for %ss; failing closed\n' "$SCRIPT_NAME" "$sensor_path" "$sensor_unavailable_seconds" >&2
+                terminate_group
+                exit 1
             fi
-        elif awk -v rpm="$rpm" -v pause="$pause_rpm" 'BEGIN { exit !(rpm > pause) }'; then
-            send_group_signal STOP
-            paused=1
-            resume_since=""
+        else
+            if [[ -n $sensor_unavailable_since ]]; then
+                printf '%s: sensor %s recovered at %s RPM; continuing fan policy\n' "$SCRIPT_NAME" "$sensor_path" "$rpm" >&2
+                sensor_unavailable_since=""
+            fi
+
+            if (( paused )); then
+                if awk -v rpm="$rpm" -v resume="$resume_rpm" 'BEGIN { exit !(rpm < resume) }'; then
+                    if [[ -z $resume_since ]]; then
+                        resume_since=$SECONDS
+                    elif awk -v elapsed="$((SECONDS - resume_since))" -v needed="$resume_seconds" 'BEGIN { exit !(elapsed >= needed) }'; then
+                        send_group_signal CONT
+                        paused=0
+                        resume_since=""
+                        printf '%s: fan at %s RPM; resumed encoder group\n' "$SCRIPT_NAME" "$rpm" >&2
+                    fi
+                else
+                    resume_since=""
+                fi
+            elif awk -v rpm="$rpm" -v pause="$pause_rpm" 'BEGIN { exit !(rpm > pause) }'; then
+                send_group_signal STOP
+                paused=1
+                resume_since=""
+                printf '%s: fan at %s RPM (above %s); paused encoder group\n' "$SCRIPT_NAME" "$rpm" "$pause_rpm" >&2
+            fi
         fi
     fi
 
