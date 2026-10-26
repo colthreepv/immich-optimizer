@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly SCRIPT_NAME="${0##*/}"
+
+child_pid=""
+child_status=0
+shutdown_code=0
+timeout_hit=0
+resume_since=""
+sensor_path=""
+paused=0
+
+fail() {
+    printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2
+    exit 1
+}
+
+is_uint() {
+    [[ ${1:-} =~ ^[0-9]+$ ]]
+}
+
+is_number() {
+    [[ ${1:-} =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]
+}
+
+sensor_enabled=${QUIET_EXEC_SENSOR_ENABLED:-1}
+case "${sensor_enabled,,}" in
+    1|true|yes|on) sensor_enabled=1 ;;
+    0|false|no|off) sensor_enabled=0 ;;
+    *) fail "QUIET_EXEC_SENSOR_ENABLED must be 0/1, true/false, yes/no, or on/off" ;;
+esac
+
+sensor_root=${QUIET_EXEC_SENSOR_ROOT:-/sys/class/hwmon}
+sensor_name=${QUIET_EXEC_SENSOR_NAME:-it8613_rpm}
+pause_rpm=${QUIET_EXEC_PAUSE_RPM:-3000}
+resume_rpm=${QUIET_EXEC_RESUME_RPM:-2600}
+resume_seconds=${QUIET_EXEC_RESUME_SECONDS:-60}
+poll_seconds=${QUIET_EXEC_POLL_SECONDS:-2}
+term_grace_seconds=${QUIET_EXEC_TERM_GRACE_SECONDS:-10}
+timeout_seconds=${QUIET_EXEC_TIMEOUT_SECONDS:-}
+
+is_number "$pause_rpm" || fail "QUIET_EXEC_PAUSE_RPM must be a non-negative number"
+is_number "$resume_rpm" || fail "QUIET_EXEC_RESUME_RPM must be a non-negative number"
+is_number "$resume_seconds" || fail "QUIET_EXEC_RESUME_SECONDS must be a non-negative number"
+is_number "$poll_seconds" || fail "QUIET_EXEC_POLL_SECONDS must be a positive number"
+is_uint "$term_grace_seconds" || fail "QUIET_EXEC_TERM_GRACE_SECONDS must be a non-negative integer"
+
+if awk -v poll="$poll_seconds" 'BEGIN { exit !(poll > 0) }'; then
+    :
+else
+    fail "QUIET_EXEC_POLL_SECONDS must be greater than zero"
+fi
+
+if awk -v resume="$resume_rpm" -v pause="$pause_rpm" 'BEGIN { exit !(resume <= pause) }'; then
+    :
+else
+    fail "QUIET_EXEC_RESUME_RPM must not exceed QUIET_EXEC_PAUSE_RPM"
+fi
+
+if [[ -n $timeout_seconds ]]; then
+    is_number "$timeout_seconds" || fail "QUIET_EXEC_TIMEOUT_SECONDS must be a positive number when set"
+    if ! awk -v timeout="$timeout_seconds" 'BEGIN { exit !(timeout > 0) }'; then
+        fail "QUIET_EXEC_TIMEOUT_SECONDS must be greater than zero when set"
+    fi
+fi
+
+[[ $# -gt 0 ]] || fail "usage: $SCRIPT_NAME COMMAND [ARG ...]"
+
+find_sensor_input() {
+    local hwmon name input
+    [[ -d $sensor_root ]] || return 1
+
+    for hwmon in "$sensor_root"/hwmon*; do
+        [[ -d $hwmon && -r $hwmon/name ]] || continue
+        IFS= read -r name < "$hwmon/name" || continue
+        [[ $name == "$sensor_name" ]] || continue
+
+        for input in "$hwmon"/rpm*_input "$hwmon"/fan*_input; do
+            if [[ -r $input ]]; then
+                printf '%s\n' "$input"
+                return 0
+            fi
+        done
+    done
+
+    return 1
+}
+
+read_rpm() {
+    local value
+    IFS= read -r value < "$sensor_path" || return 1
+    is_uint "$value" || return 1
+    printf '%s\n' "$value"
+}
+
+send_group_signal() {
+    local signal=$1
+    [[ -n $child_pid ]] || return 0
+    kill -s "$signal" -- "-$child_pid" 2>/dev/null || true
+}
+
+child_running() {
+    local state=""
+    [[ -n $child_pid && -r /proc/$child_pid/status ]] || return 1
+    while IFS=$':\t ' read -r key value _; do
+        if [[ $key == "State" ]]; then
+            state=$value
+            break
+        fi
+    done < "/proc/$child_pid/status"
+    [[ -n $state && $state != "Z" ]]
+}
+
+wait_for_child() {
+    local status=0
+    wait "$child_pid" || status=$?
+    child_pid=""
+    return "$status"
+}
+
+terminate_group() {
+    local elapsed
+    [[ -n $child_pid ]] || return 0
+
+    if kill -0 -- "-$child_pid" 2>/dev/null; then
+        send_group_signal CONT
+        send_group_signal TERM
+
+        elapsed=0
+        while child_running && (( elapsed < term_grace_seconds * 10 )); do
+            sleep 0.1 || true
+            ((elapsed += 1)) || true
+        done
+
+        if kill -0 -- "-$child_pid" 2>/dev/null; then
+            send_group_signal KILL
+        fi
+    fi
+
+    child_status=0
+    wait_for_child || child_status=$?
+}
+
+cleanup() {
+    local original_status=$?
+    trap - EXIT INT TERM
+    terminate_group
+    exit "$original_status"
+}
+
+trap cleanup EXIT
+trap 'shutdown_code=143' TERM
+trap 'shutdown_code=130' INT
+
+if (( sensor_enabled )); then
+    sensor_path=$(find_sensor_input) || fail "sensor '$sensor_name' with an rpm/fan input was not found below '$sensor_root'"
+fi
+
+setsid --wait "$@" &
+child_pid=$!
+started_at=$SECONDS
+
+while :; do
+    if (( shutdown_code != 0 )); then
+        terminate_group
+        exit "$shutdown_code"
+    fi
+
+    if [[ -n $timeout_seconds ]] && awk -v elapsed="$((SECONDS - started_at))" -v timeout="$timeout_seconds" 'BEGIN { exit !(elapsed >= timeout) }'; then
+        timeout_hit=1
+        terminate_group
+        exit 124
+    fi
+
+    if ! child_running; then
+        terminate_group
+        if (( timeout_hit )); then
+            exit 124
+        fi
+        exit "$child_status"
+    fi
+
+    if (( sensor_enabled )); then
+        if ! rpm=$(read_rpm); then
+            printf '%s: unable to read sensor %s; failing closed\n' "$SCRIPT_NAME" "$sensor_path" >&2
+            terminate_group
+            exit 1
+        fi
+
+        if (( paused )); then
+            if awk -v rpm="$rpm" -v resume="$resume_rpm" 'BEGIN { exit !(rpm < resume) }'; then
+                if [[ -z $resume_since ]]; then
+                    resume_since=$SECONDS
+                elif awk -v elapsed="$((SECONDS - resume_since))" -v needed="$resume_seconds" 'BEGIN { exit !(elapsed >= needed) }'; then
+                    send_group_signal CONT
+                    paused=0
+                    resume_since=""
+                fi
+            else
+                resume_since=""
+            fi
+        elif awk -v rpm="$rpm" -v pause="$pause_rpm" 'BEGIN { exit !(rpm > pause) }'; then
+            send_group_signal STOP
+            paused=1
+            resume_since=""
+        fi
+    fi
+
+    sleep "$poll_seconds" || true
+done

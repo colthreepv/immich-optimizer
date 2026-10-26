@@ -1,0 +1,7 @@
+.git
+.notes
+*.env
+*.tar
+artifacts
+state
+spool

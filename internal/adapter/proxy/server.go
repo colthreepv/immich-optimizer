@@ -38,6 +38,7 @@ type jobState struct {
 }
 
 type Server struct {
+	saver         *storageSaver
 	upstreamURL   *url.URL
 	bindAddr      string
 	filterPath    string
@@ -122,6 +123,20 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.saver != nil {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		if s.isUploadRequest(r) {
+			s.serveVerifiedUpload(w, r)
+			return
+		}
+		if s.saver.mobileView && s.serveMobileView(w, r) {
+			return
+		}
+	}
 	if r.URL.Path == "/_immich-upload-optimizer/wait" {
 		s.continueJob(w, r)
 		return

@@ -11,6 +11,9 @@ type Config struct {
 }
 
 type AppConfig struct {
+	StateDir              string
+	PresetID              string
+	MobileView            bool
 	ShowVersion           bool
 	Mode                  string
 	BindAddr              string
@@ -27,4 +30,3 @@ type AppConfig struct {
 	LogLevel              string
 	Tasks                 *Config
 }
-

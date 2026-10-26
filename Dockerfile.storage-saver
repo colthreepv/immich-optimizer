@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1.7
+
+ARG GO_IMAGE=golang:1.26.5-bookworm
+FROM ${GO_IMAGE} AS builder
+
+WORKDIR /src
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
+ENV CGO_ENABLED=0
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN go build \
+    -buildvcs=false \
+    -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
+    -o /out/immich-optimizer \
+    ./cmd/optimizer
+
+FROM debian:trixie-slim
+
+ARG LIB_AVIF_VERSION=1.2.1-1.2
+ARG APP_UID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        exiftool \
+        ffmpeg \
+        libavif-bin="${LIB_AVIF_VERSION}" \
+        mawk \
+        tini \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid "${APP_UID}" immich-optimizer \
+    && useradd --uid "${APP_UID}" --gid immich-optimizer --create-home --shell /usr/sbin/nologin immich-optimizer \
+    && install -d -o immich-optimizer -g immich-optimizer \
+        /etc/immich-optimizer/config/storage-saver \
+        /watch \
+        /undone
+
+COPY --from=builder /out/immich-optimizer /usr/local/bin/immich-optimizer
+COPY --chmod=0755 scripts/storage-saver/quiet-exec scripts/storage-saver/jpeg-to-avif.sh /usr/local/bin/
+COPY --chown=immich-optimizer:immich-optimizer \
+    config/storage-saver/tasks-avif-q50-s6-420-v1.yaml \
+    /etc/immich-optimizer/config/storage-saver/tasks.yaml
+
+ENV IUO_MODE=proxy \
+    IUO_TASKS_FILE=/etc/immich-optimizer/config/storage-saver/tasks.yaml \
+    IUO_WATCH_DIR=/watch \
+    IUO_UNDONE_DIR=/undone \
+    QUIET_EXEC_SENSOR_ENABLED=1 \
+    QUIET_EXEC_SENSOR_NAME=it8613_rpm \
+    QUIET_EXEC_PAUSE_RPM=3000 \
+    QUIET_EXEC_RESUME_RPM=2600 \
+    QUIET_EXEC_RESUME_SECONDS=60
+
+LABEL org.opencontainers.image.title="Immich Optimizer Storage Saver" \
+      org.opencontainers.image.description="JPEG to AVIF storage optimization with thermal fan supervision" \
+      org.opencontainers.image.source="https://github.com/colthreepv/immich-optimizer" \
+      org.opencontainers.image.licenses="MIT" \
+      com.immich-optimizer.avif-preset="avif-q50-s6-420-v1"
+
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+USER immich-optimizer
+WORKDIR /watch
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:8080/healthz >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["immich-optimizer"]

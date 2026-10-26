@@ -79,6 +79,9 @@ func parseConfig(args []string) (*entity.AppConfig, bool, error) {
 	viper.SetDefault("inotify_buffer_size", 8192)
 
 	fs := flag.NewFlagSet("immich-optimizer", flag.ContinueOnError)
+	fs.StringVar(&ac.StateDir, "state_dir", os.Getenv("IUO_STATE_DIR"), "Persistent storage-saver state and staging directory (enables verified ingestion)")
+	fs.StringVar(&ac.PresetID, "preset_id", envOr("IUO_PRESET_ID", "avif-q50-s6-420-v1"), "Versioned conversion preset identifier")
+	fs.BoolVar(&ac.MobileView, "mobile_view", os.Getenv("IUO_MOBILE_VIEW") == "true", "Experimental original-checksum view for sync API responses")
 	fs.BoolVar(&ac.ShowVersion, "version", false, "Show the current version")
 	fs.StringVar(&ac.Mode, "mode", viper.GetString("mode"), "Operating mode: watcher or proxy (comma-separated for multiple)")
 	fs.StringVar(&ac.BindAddr, "bind_addr", viper.GetString("bind_addr"), "Address for reverse proxy server to listen on")
@@ -312,6 +315,11 @@ func run(args []string) error {
 			config.MaxConcurrentRequests,
 			config.HTTPTimeoutSeconds,
 		)
+		if config.StateDir != "" {
+			if err := proxyServer.EnableStorageSaver(config.StateDir, config.PresetID, config.MobileView); err != nil {
+				return fmt.Errorf("storage saver: %w", err)
+			}
+		}
 		if err := proxyServer.Start(); err != nil {
 			return fmt.Errorf("error starting proxy server: %w", err)
 		}
@@ -347,6 +355,13 @@ func run(args []string) error {
 	}
 
 	return nil
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func printVersion() string {
