@@ -8,6 +8,10 @@ Immich. It never edits Immich's database or managed files.
 
 1. Resolve the authenticated user through `/api/users/me`.
 2. Persist the source and its SHA-1 in a dedicated staging volume.
+   Before staging/converting a cache miss, check that original checksum through
+   Immich's owner-scoped bulk upload check. Existing active originals return
+   their asset ID after download verification, with no conversion or upload.
+   Trashed duplicates fail explicitly rather than creating a replacement.
 3. Convert according to a versioned, fixed preset; retain the original if the
    output is not smaller. Store the converted bytes before sending to Immich.
 4. Preserve upload timestamps, sidecars, client metadata and other form fields.
