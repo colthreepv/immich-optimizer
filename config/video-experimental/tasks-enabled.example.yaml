@@ -1,0 +1,68 @@
+# Experimental video profile: opt-in example only.
+#
+# Do not mount this file into a phone-facing synchronous upload path yet. The
+# candidate script is preparation for a durable background worker. It requires
+# VIDEO_CODEC, VIDEO_PRESET and one of VIDEO_CRF or VIDEO_BITRATE at runtime.
+tasks:
+  - name: avif-q50-s6-420-v1
+    command: >-
+      /usr/local/bin/jpeg-to-avif.sh
+      "{{.src_folder}}/{{.name}}.{{.extension}}"
+      "{{.dst_folder}}/{{.name}}.avif"
+    extensions:
+      - jpg
+      - jpeg
+      - jpe
+      - jfif
+
+  - name: passthrough-avif-heic-webp-png
+    command: ""
+    extensions:
+      - avif
+      - heic
+      - heif
+      - webp
+      - png
+
+  - name: passthrough-other-images
+    command: ""
+    extensions:
+      - bmp
+      - gif
+      - insp
+      - jxl
+      - psd
+      - raw
+      - rw2
+      - svg
+      - tif
+      - tiff
+
+  - name: video-candidate-experimental
+    command: >-
+      /usr/local/bin/video-candidate.sh
+      "{{.src_folder}}/{{.name}}.{{.extension}}"
+      "{{.dst_folder}}/{{.name}}"
+    extensions:
+      - 3gp
+      - 3gpp
+      - av1
+      - avi
+      - flv
+      - hevc
+      - insv
+      - m2t
+      - m2ts
+      - m4v
+      - mkv
+      - mod
+      - mov
+      - mpe
+      - mpeg
+      - mpg
+      - mp4
+      - mts
+      - tod
+      - ts
+      - webm
+      - wmv

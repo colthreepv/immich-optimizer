@@ -1,0 +1,66 @@
+# Experimental video profile: disabled by default.
+#
+# Videos are passed through byte-for-byte. Keep VIDEO_TRANSCODE_ENABLED unset or
+# set it to 0. The image and video tasks are a deliberate snapshot of the
+# storage-saver profile so this experiment can be mounted without changing the
+# active storage-saver configuration.
+tasks:
+  - name: avif-q50-s6-420-v1
+    command: >-
+      /usr/local/bin/jpeg-to-avif.sh
+      "{{.src_folder}}/{{.name}}.{{.extension}}"
+      "{{.dst_folder}}/{{.name}}.avif"
+    extensions:
+      - jpg
+      - jpeg
+      - jpe
+      - jfif
+
+  - name: passthrough-avif-heic-webp-png
+    command: ""
+    extensions:
+      - avif
+      - heic
+      - heif
+      - webp
+      - png
+
+  - name: passthrough-other-images
+    command: ""
+    extensions:
+      - bmp
+      - gif
+      - insp
+      - jxl
+      - psd
+      - raw
+      - rw2
+      - svg
+      - tif
+      - tiff
+
+  - name: passthrough-videos
+    command: ""
+    extensions:
+      - 3gp
+      - 3gpp
+      - av1
+      - avi
+      - flv
+      - hevc
+      - insv
+      - m2t
+      - m2ts
+      - m4v
+      - mkv
+      - mod
+      - mov
+      - mpe
+      - mpeg
+      - mpg
+      - mp4
+      - mts
+      - tod
+      - ts
+      - webm
+      - wmv

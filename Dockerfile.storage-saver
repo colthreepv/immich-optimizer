@@ -51,7 +51,7 @@ RUN groupadd --gid "${APP_UID}" immich-optimizer \
         /undone
 
 COPY --from=builder /out/immich-optimizer /usr/local/bin/immich-optimizer
-COPY --chmod=0755 scripts/storage-saver/quiet-exec scripts/storage-saver/jpeg-to-avif.sh /usr/local/bin/
+COPY --chmod=0755 scripts/storage-saver/quiet-exec scripts/storage-saver/jpeg-to-avif.sh scripts/storage-saver/video-candidate.sh /usr/local/bin/
 COPY --chown=immich-optimizer:immich-optimizer \
     config/storage-saver/tasks-avif-q50-s6-420-v1.yaml \
     /etc/immich-optimizer/config/storage-saver/tasks.yaml
