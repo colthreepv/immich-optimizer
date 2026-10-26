@@ -74,6 +74,28 @@ function Get-OptionalProperty {
     return $property.Value
 }
 
+function Expand-Collection {
+    param([AllowNull()] [object]$Value)
+
+    $result = [Collections.Generic.List[object]]::new()
+    $queue = [Collections.Queue]::new()
+    $queue.Enqueue($Value)
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue()
+        if ($null -eq $item) {
+            continue
+        }
+        if ($item -is [Collections.IList] -and $item -isnot [string]) {
+            foreach ($child in $item) {
+                $queue.Enqueue($child)
+            }
+            continue
+        }
+        $result.Add($item)
+    }
+    return $result.ToArray()
+}
+
 function Assert-Hash {
     param(
         [Parameter(Mandatory = $true)] [string]$Value,
@@ -377,13 +399,15 @@ function Get-AuthenticatedOwner {
 }
 
 function Get-AllAssetIDs {
-    $page = 1
-    $seenPages = @{}
     $seenAssetIDs = @{}
     $assetIDs = [Collections.Generic.List[string]]::new()
     $uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-    while ($true) {
+    # Locked-folder metadata requires an unlocked user session, not this API-key flow.
+    foreach ($visibility in @('timeline', 'archive', 'hidden')) {
+      $page = 1
+      $seenPages = @{}
+      while ($true) {
         if ($seenPages.ContainsKey([string]$page)) {
             throw "Search pagination repeated page $page"
         }
@@ -392,9 +416,10 @@ function Get-AllAssetIDs {
         $response = Invoke-ImmichJson -Method 'POST' -Path '/api/search/metadata' -Body ([ordered]@{
             page = $page
             size = $PageSize
+            visibility = $visibility
         })
         $assets = Get-RequiredProperty $response 'assets' 'Search response'
-        $items = @((Get-RequiredProperty $assets 'items' 'Search response assets'))
+        $items = @(Expand-Collection (Get-RequiredProperty $assets 'items' 'Search response assets'))
         foreach ($item in $items) {
             $assetID = [string](Get-RequiredProperty $item 'id' 'Search asset')
             if ($assetID -notmatch $uuidPattern) {
@@ -418,6 +443,7 @@ function Get-AllAssetIDs {
             throw 'Search returned a next page without any assets'
         }
         $page = $nextPage
+      }
     }
 
     return $assetIDs.ToArray()
@@ -427,7 +453,7 @@ function Get-ProvenanceEntry {
     param([Parameter(Mandatory = $true)] [string]$AssetID)
 
     $escapedID = [Uri]::EscapeDataString($AssetID)
-    $metadata = @(Invoke-ImmichJson -Method 'GET' -Path "/api/assets/$escapedID/metadata")
+    $metadata = @(Expand-Collection (Invoke-ImmichJson -Method 'GET' -Path "/api/assets/$escapedID/metadata"))
     $matches = @($metadata | Where-Object {
         [string](Get-OptionalProperty $_ 'key') -ceq $script:ProvenanceKey
     })

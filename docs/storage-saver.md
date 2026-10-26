@@ -23,6 +23,15 @@ an asset. Corrupt state is an error, never an instruction to reset the cache.
 Run one replica with upload concurrency one. The JSON ledger is intended for this
 pilot; it is not a multi-process database. Back up the complete state volume.
 
+Recovery helper: `scripts/storage-saver/rebuild-ledger.ps1` reads the API key from
+`IUO_IMMICH_API_KEY`, searches timeline/archive/hidden assets, verifies each stored
+original against provenance, and writes a reconstructed ledger outside the
+repository. Stop the optimizer before replacing its ledger; keep the old volume
+and use a separate destination to test recovery first. Existing ledgers require
+explicit `-Merge`; corrupt state must be preserved for investigation.
+Locked-folder assets require a separate unlocked-session recovery path and are
+excluded from this API-key helper.
+
 Staged sources and outputs are deliberately retained in this experiment, even
 after successful upload. Disk reclamation needs a separate verified cleanup
 policy. Failed uploads must never trigger automatic deletion of source files.
