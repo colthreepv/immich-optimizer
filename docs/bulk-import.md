@@ -79,3 +79,33 @@ the time of import; final server verification remains the parent's responsibilit
 Do not delete staged output until the parent has completed verification/merge.
 
 Run importer tests with `bun test scripts/storage-saver/import-camera.test.ts`.
+
+## Performance review during the eight-worker run
+
+On 2026-10-30, a separate traced conversion of `IMG_20230408_181453.jpg`
+used the same image, one-CPU limit and preset while the import continued.
+Total wall time was 5.87 seconds; encoding accounted for 4.01 seconds,
+metadata extraction about 1.4 seconds, and container/CLI overhead about
+0.38 seconds. This is one sample under concurrent load, not an overall ETA.
+
+A separate three-repeat metadata benchmark compared fourteen scalar ExifTool
+processes (ten source tags and four output tags) against two batched reads
+of those same tags. Scalar reads took 1.546 / 2.013 / 1.595 seconds; batched
+reads took 0.176 / 0.224 / 0.222 seconds. Binary XMP/ICC extraction, unsupported
+feature rejection, dimensions, transform checks and all preservation assertions
+must remain when implementing batching. No batching change has been deployed.
+
+Three `docker run --rm ... true` probes took 0.550 / 0.416 / 0.417 seconds.
+Persistent worker containers could amortize some of that overhead, but the
+larger measured opportunity is reducing repeated ExifTool startup. A later
+implementation should keep one bounded container per worker, its input mount
+read-only, and process cleanup confined to its own jobs. Neither optimization
+requires a quality or preset change. Both need representative end-to-end
+validation before restarting the importer; larger images may be dominated by
+encoding and benefit much less.
+
+The current process and importer source were left unchanged during profiling.
+Evidence lives outside the repository under
+`C:\Users\valerio\Documents\Codex\2026-10-30\immich-experiments\import-profile`.
+Completed checkpoints continue to work after a parent ledger merge: resume
+skips their API calls, while an incomplete upload checks direct-backend B.
