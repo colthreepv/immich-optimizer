@@ -2,7 +2,7 @@ import {test,expect} from 'bun:test';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {checkSource,digest,fallbackReason,main,parseDuplicate,parseSource} from './import-camera';
+import {checkSource,converterCommand,digest,fallbackReason,main,parseDuplicate,parseSource} from './import-camera';
 
 test('bulk duplicate checks reject ambiguous and trashed responses',()=>{
   const r={id:'a',action:'reject',reason:'duplicate',assetId:'id',isTrashed:false};
@@ -17,6 +17,15 @@ test('fallback only permits explicit feature exclusions',()=>{
 });
 test('bulk uploads require explicit parent review before touching state',async()=>{
   await expect(main(['--manifest','unused','--state','unused','--limit','8180','--upload'])).rejects.toThrow('--bulk-reviewed');
+});
+test('converter override is explicit, read-only and keeps original defaults',()=>{
+  const standard=converterCommand('image','C:\\Camera\\photo.jpg','C:\\stage',null);
+  expect(standard.slice(-4)).toEqual(['image','jpeg-to-avif.sh','/input/photo.jpg','/output/output.avif']);
+  expect(standard.some(x=>x.includes('/converter.sh'))).toBe(false);
+  const custom=converterCommand('image','C:\\Camera\\photo.jpg','C:\\stage','C:\\repo with spaces\\import-camera-convert.sh');
+  expect(custom).toContain('type=bind,source=C:\\repo with spaces\\import-camera-convert.sh,target=/converter.sh,readonly');
+  expect(custom.slice(-5)).toEqual(['image','bash','/converter.sh','/input/photo.jpg','/output/output.avif']);
+  expect(custom).toContain('AVIF_JOBS=1');
 });
 test('lost upload acknowledgement resumes by output checksum, verifies download and exports provenance',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'camera-import-'));const oldUrl=process.env.IUO_IMMICH_URL,oldKey=process.env.IUO_IMMICH_API_KEY;

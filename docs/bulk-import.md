@@ -109,3 +109,43 @@ Evidence lives outside the repository under
 `C:\Users\valerio\Documents\Codex\2026-10-30\immich-experiments\import-profile`.
 Completed checkpoints continue to work after a parent ledger merge: resume
 skips their API calls, while an incomplete upload checks direct-backend B.
+
+## Opt-in batched converter
+
+`scripts/storage-saver/import-camera-convert.sh` implements the same encoder
+invocation and preservation assertions with two batched ExifTool JSON reads.
+Perl core JSON::PP/MIME::Base64 decode binary XMP/ICC; source feature checks run
+before encoding. Dates, offsets, GPS and ICC bytes are compared afterward,
+with the existing dimensions, YUV420, color signals and orientation checks.
+The image, preset identifier and provenance contract are unchanged.
+
+After parent review, stop/drain the current importer and resume the same command
+and state directory with this additional explicit option:
+
+```powershell
+--converter-script 'C:\Users\valerio\projects\public\immich-optimizer\scripts\storage-saver\import-camera-convert.sh'
+```
+
+The importer mounts that file read-only at `/converter.sh` and invokes it through
+Bash. Omitting the option retains the original converter. Existing prepared
+outputs and successful checkpoints are reused. No live process changes its
+converter automatically. The parent coordinates draining in-flight containers
+and releasing the state lock before restarting.
+
+Verification: three retained pilot outputs and five additional 20 MP images
+(5184x3888 or 3888x5184) all produced byte-identical SHA-256 outputs versus the
+original converter, with jobs=1 and identical encoder flags. Five sequential
+paired runs, alternating old/new order while the bulk import continued, took
+34.51 seconds old versus 23.72 seconds new (31% less wall time). This measures
+the sample, not an assured improvement to eight-worker aggregate throughput.
+Evidence: `immich-experiments\import-batch-profile\paired-timings.json`.
+
+Run the 46 metadata validator cases in the existing image:
+
+```powershell
+docker run --rm --network none --mount 'type=bind,source=C:\Users\valerio\projects\public\immich-optimizer,target=/repo,readonly' colthreepv/immich-optimizer:storage-saver-ccc6b3e bash /repo/scripts/storage-saver/import-camera-convert.test.sh
+```
+
+The cases include altered/missing date, offset, GPS and ICC, every EXIF
+orientation, absent/mismatched AVIF transforms, dimensions, YUV and color
+signals, MPF, textual/base64 motion/HDR markers and malformed binary metadata.

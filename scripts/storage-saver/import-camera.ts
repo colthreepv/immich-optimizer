@@ -26,6 +26,12 @@ export async function checkSource(s:Source) {
 export function fallbackReason(stderr:string):string|null {
   return stderr.match(/unsupported (?:multi-picture JPEG \(MPF\)|motion or HDR JPEG)/)?.[0] ?? null;
 }
+export function converterCommand(image:string, source:string, dir:string, script:string|null):string[] {
+  const command=['docker','run','--rm','--network','none','--cpus','1','-e','QUIET_EXEC_SENSOR_ENABLED=0','-e','AVIF_JOBS=1','--mount',`type=bind,source=${dirname(source)},target=/input,readonly`,'--mount',`type=bind,source=${dir},target=/output`];
+  if(script)command.push('--mount',`type=bind,source=${script},target=/converter.sh,readonly`);
+  command.push(image,...(script?['bash','/converter.sh']:['jpeg-to-avif.sh']),`/input/${basename(source)}`,'/output/output.avif');
+  return command;
+}
 export function parseDuplicate(value:unknown, hash:string):string|null {
   const root=object(value); if(!Array.isArray(root.results)||root.results.length!==1) throw Error('Invalid bulk check results');
   const r=object(root.results[0]); if(r.id!==hash) throw Error('Unrelated bulk check result');
@@ -41,7 +47,7 @@ async function atomic(path:string, value:unknown) {
 export async function main(args=process.argv.slice(2)) {
   const options=new Map<string,string>();
   for(let i=0;i<args.length;i++) {if(!args[i].startsWith('--')) throw Error('Expected named option'); const k=args[i].slice(2);if(options.has(k))throw Error(`Duplicate option ${k}`); options.set(k,args[i+1]?.startsWith('--')||!args[i+1]?'true':args[++i]);}
-  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image','recheck'];
+  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image','recheck','converter-script'];
   for(const k of options.keys()) if(!allowed.includes(k))throw Error(`Unknown option ${k}`);
   const required=(k:string)=>{const v=options.get(k);if(!v||v==='true')throw Error(`--${k} is required`);return v;};
   const manifest=resolve(required('manifest')), state=resolve(required('state'));
@@ -50,6 +56,8 @@ export async function main(args=process.argv.slice(2)) {
   const upload=options.has('upload'), bulk=options.has('bulk-reviewed');
   if(upload&&limit>10&&!bulk)throw Error('More than 10 uploads requires --bulk-reviewed after parent pilot approval');
   const verifyDownload=options.has('download-verify')||!bulk;
+  const converterScript=options.has('converter-script')?resolve(required('converter-script')):null;
+  if(converterScript&&!(await stat(converterScript)).isFile())throw Error('--converter-script must name a file');
   const base=(process.env.IUO_IMMICH_URL??'').replace(/\/$/,''); const key=process.env.IUO_IMMICH_API_KEY??'';
   if(upload&&(!base||!key))throw Error('Set IUO_IMMICH_URL (direct backend) and IUO_IMMICH_API_KEY');
   await mkdir(state,{recursive:true});
@@ -88,7 +96,7 @@ export async function main(args=process.argv.slice(2)) {
           if(JSON.stringify(p.source)!==JSON.stringify(s)||h.sha1!==p.sha1||h.sha256!==p.sha256||h.size!==p.size)throw Error('Prepared checkpoint mismatch');
         } else {
           const out=join(dir,'output.avif'); const image=options.get('image')??'colthreepv/immich-optimizer:storage-saver-ccc6b3e';
-          const child=Bun.spawn(['docker','run','--rm','--network','none','--cpus','1','-e','QUIET_EXEC_SENSOR_ENABLED=0','-e','AVIF_JOBS=1','--mount',`type=bind,source=${dirname(s.source_path)},target=/input,readonly`,'--mount',`type=bind,source=${dir},target=/output`,image,'jpeg-to-avif.sh',`/input/${basename(s.source_path)}`,'/output/output.avif'],{stdout:'ignore',stderr:'pipe'});
+          const child=Bun.spawn(converterCommand(image,s.source_path,dir,converterScript),{stdout:'ignore',stderr:'pipe'});
           const stderr=await new Response(child.stderr).text(), code=await child.exited;
           await Bun.write(join(dir,'converter.log'),stderr);
           let reason='converted',path=out;
