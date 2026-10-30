@@ -6,7 +6,13 @@ Original-first is opt-in; the existing storage-saver mode remains available. The
 
 ## Configuration
 
-The planned image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.2`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
+The planned image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.3`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
+
+## Release
+
+Create and push a new version tag, then publish its GitHub prerelease. The `published` release event starts validation and the image build. Wait for CI to pass and the tagged GHCR image to be available before deploying it. A push to `main` runs validation only; pushing a tag alone does not build the image.
+
+If the image for a version already exists, do not manually dispatch or republish that version to rebuild it. Use a new version tag for another build. Manual dispatch on a new tag remains available if automatic event delivery fails.
 
 Server settings for original-first mode:
 

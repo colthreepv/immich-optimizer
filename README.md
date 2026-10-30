@@ -8,7 +8,7 @@ Original-first ingestion is opt-in. The existing storage-saver mode remains avai
 
 Before enabling retirement, turn off Sync Remote Deletions on every phone. In Immich Android 3.3.4, this setting is under Advanced. The server does not enforce this setting.
 
-The intended release image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.2`, for Linux amd64. The same image runs the server with `immich-optimizer` and the worker with `optimizer-worker`. The image contains the JPEG-to-AVIF preset `avif-q50-s6-420-v1` and libavif 1.2.1.
+The intended release image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.3`, for Linux amd64. The same image runs the server with `immich-optimizer` and the worker with `optimizer-worker`. The image contains the JPEG-to-AVIF preset `avif-q50-s6-420-v1` and libavif 1.2.1.
 
 The server's public proxy listens on port 8080 by default. Its separate worker API listens on port 8082. The worker exposes its local health endpoint on `127.0.0.1:8081/health`; use `optimizer-worker health` for a container health check. The image's default health check targets the server and needs an override for the worker.
 
