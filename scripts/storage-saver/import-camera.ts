@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
+import {ConverterPool,poolRoots} from './import-camera-pool';
 
 export type Source = {source_path:string;relative_path:string;size_bytes:number;last_write_utc:string;source_sha1:string;source_sha256:string};
 type Prepared = {source:Source;path:string;sha1:string;sha256:string;size:number;filename:string;preset:string;reason:string};
@@ -47,7 +48,7 @@ async function atomic(path:string, value:unknown) {
 export async function main(args=process.argv.slice(2)) {
   const options=new Map<string,string>();
   for(let i=0;i<args.length;i++) {if(!args[i].startsWith('--')) throw Error('Expected named option'); const k=args[i].slice(2);if(options.has(k))throw Error(`Duplicate option ${k}`); options.set(k,args[i+1]?.startsWith('--')||!args[i+1]?'true':args[++i]);}
-  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image','recheck','converter-script'];
+  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image','recheck','converter-script','persistent-workers','worker-timeout-seconds','pool-memory-mb'];
   for(const k of options.keys()) if(!allowed.includes(k))throw Error(`Unknown option ${k}`);
   const required=(k:string)=>{const v=options.get(k);if(!v||v==='true')throw Error(`--${k} is required`);return v;};
   const manifest=resolve(required('manifest')), state=resolve(required('state'));
@@ -57,11 +58,17 @@ export async function main(args=process.argv.slice(2)) {
   if(upload&&limit>10&&!bulk)throw Error('More than 10 uploads requires --bulk-reviewed after parent pilot approval');
   const verifyDownload=options.has('download-verify')||!bulk;
   const converterScript=options.has('converter-script')?resolve(required('converter-script')):null;
+  const persistent=options.has('persistent-workers');
+  if(persistent&&options.get('persistent-workers')!=='true')throw Error('--persistent-workers is a boolean flag');
+  const workerTimeout=Number(options.get('worker-timeout-seconds')??'300'),poolMemory=Number(options.get('pool-memory-mb')??'1024');
+  if(!Number.isInteger(workerTimeout)||workerTimeout<1||workerTimeout>3600||!Number.isInteger(poolMemory)||poolMemory<128||poolMemory>4096)throw Error('Invalid pool timeout/memory');
   if(converterScript&&!(await stat(converterScript)).isFile())throw Error('--converter-script must name a file');
   const base=(process.env.IUO_IMMICH_URL??'').replace(/\/$/,''); const key=process.env.IUO_IMMICH_API_KEY??'';
   if(upload&&(!base||!key))throw Error('Set IUO_IMMICH_URL (direct backend) and IUO_IMMICH_API_KEY');
   await mkdir(state,{recursive:true});
   const lock=await open(join(state,'import.lock'),'wx'); await lock.writeFile(String(process.pid));
+  let pool:ConverterPool|null=null,stopping=false;
+  const stop=()=>{stopping=true;process.exitCode=130;void pool?.close().catch(e=>console.error(String(e)));};
   try {
     const request=async(path:string,init:RequestInit={})=>{
       const r=await fetch(base+path,{...init,headers:{'x-api-key':key,...init.headers},signal:AbortSignal.timeout(180000)});
@@ -72,9 +79,16 @@ export async function main(args=process.argv.slice(2)) {
     const owner=upload?object(await json('/api/users/me')).id:'prepare-only'; if(typeof owner!=='string'||!owner)throw Error('Invalid owner');
     const rows=(await readFile(manifest,'utf8')).split(/\r?\n/).filter(Boolean).map(x=>parseSource(JSON.parse(x))).slice(0,limit);
     if(new Set(rows.map(s=>s.source_sha1)).size!==rows.length)throw Error('Repeated source SHA1 in manifest');
+    if(persistent){
+      const roots=await poolRoots(rows.map(s=>s.source_path),state,converterScript);
+      pool=new ConverterPool({state:roots.stage,...roots,image:options.get('image')??'colthreepv/immich-optimizer:storage-saver-ccc6b3e',workers,jobTimeoutMs:workerTimeout*1000,memoryMB:poolMemory});
+      process.on('SIGINT',stop);process.on('SIGTERM',stop);
+      await pool.start();
+    }
     let cursor=0,failed=0,completed=0;const successful=new Set<string>();
     const started=Date.now();
-    const run=async(s:Source)=>{
+    const run=async(s:Source,slot:number)=>{
+      if(stopping||pool?.failed)throw Error('Import stopping');
       const dir=join(state,s.source_sha1); await mkdir(dir,{recursive:true});
       await checkSource(s);
       if(upload&&!options.has('recheck')) {
@@ -96,8 +110,9 @@ export async function main(args=process.argv.slice(2)) {
           if(JSON.stringify(p.source)!==JSON.stringify(s)||h.sha1!==p.sha1||h.sha256!==p.sha256||h.size!==p.size)throw Error('Prepared checkpoint mismatch');
         } else {
           const out=join(dir,'output.avif'); const image=options.get('image')??'colthreepv/immich-optimizer:storage-saver-ccc6b3e';
-          const child=Bun.spawn(converterCommand(image,s.source_path,dir,converterScript),{stdout:'ignore',stderr:'pipe'});
-          const stderr=await new Response(child.stderr).text(), code=await child.exited;
+          let stderr:string,code:number;
+          if(pool){const result=await pool.convert(slot,s.source_path,dir);stderr=result.stderr;code=result.code;}
+          else {const child=Bun.spawn(converterCommand(image,s.source_path,dir,converterScript),{stdout:'ignore',stderr:'pipe'});stderr=await new Response(child.stderr).text();code=await child.exited;}
           await Bun.write(join(dir,'converter.log'),stderr);
           let reason='converted',path=out;
           if(code!==0){const unsupported=fallbackReason(stderr);if(!unsupported)throw Error(`Converter failed (${code}); inspect converter.log`);reason=unsupported;path=s.source_path;}
@@ -112,6 +127,7 @@ export async function main(args=process.argv.slice(2)) {
       const provenance={schemaVersion:1,ownerId:owner,sourceSHA1:s.source_sha1,outputSHA1:p.sha1,sourceFilename:basename(s.source_path),outputFilename:p.filename,preset:p.preset,sourceSize:s.size_bytes,outputSize:p.size};
       let id=existing;
       if(!id) {
+        if(stopping)throw Error('Import stopping');
         await checkSource(s); const h=await digest(p.path); if(h.sha1!==p.sha1||h.sha256!==p.sha256)throw Error('Output changed before upload');
         const form=new FormData();
         const fields={deviceAssetId:s.source_sha1,deviceId:'bangkokian-camera-import-v1',fileCreatedAt:s.last_write_utc,fileModifiedAt:s.last_write_utc,isFavorite:'false',filename:p.filename,metadata:JSON.stringify([{key:KEY,value:provenance}])};
@@ -147,8 +163,8 @@ export async function main(args=process.argv.slice(2)) {
       await atomic(join(dir,'result.json'),{record,verification,source_sha256:s.source_sha256,output_sha256:p.sha256,reason:p.reason,original_path:asset.originalPath??null,server_size:serverSize??null,exif:asset.exifInfo??null});
       console.log(JSON.stringify({source:s.relative_path,assetId:id,bytes:p.size,reason:p.reason,verification}));
     };
-    await Promise.all(Array.from({length:workers},async()=>{
-      while(cursor<rows.length){const s=rows[cursor++];let success=false;for(let attempt=1;attempt<=3;attempt++){try{await run(s);success=true;break;}catch(e){console.error(JSON.stringify({source:s.relative_path,attempt,error:String(e)}));if(attempt<3)await Bun.sleep(1000*2**attempt);}}
+    await Promise.all(Array.from({length:workers},async(_,slot)=>{
+      while(!stopping&&cursor<rows.length){const s=rows[cursor++];let success=false;for(let attempt=1;attempt<=3&&!stopping;attempt++){try{await run(s,slot);success=true;break;}catch(e){console.error(JSON.stringify({source:s.relative_path,attempt,error:String(e)}));if(pool?.failed){stopping=true;process.exitCode=1;}if(attempt<3&&!stopping)await Bun.sleep(1000*2**attempt);}}
         if(success){completed++;successful.add(s.source_sha1);}else failed++;
       }
     }));
@@ -157,6 +173,11 @@ export async function main(args=process.argv.slice(2)) {
     await atomic(join(state,'ledger-fragment.json'),{version:1,records:results.map(r=>r.record)});
     console.log(JSON.stringify({completed,failed,seconds:(Date.now()-started)/1000,ledger:join(state,'ledger-fragment.json')}));
     if(failed)process.exitCode=1;
-  } finally {await lock.close();await unlink(join(state,'import.lock'));}
+  } finally {
+    process.off('SIGINT',stop);process.off('SIGTERM',stop);
+    // An uncertain cleanup keeps the existing lock as an explicit recovery fence.
+    try {await pool?.close();} finally {await lock.close();}
+    await unlink(join(state,'import.lock'));
+  }
 }
 if(import.meta.main)main().catch(e=>{console.error(String(e));process.exitCode=1;});

@@ -149,3 +149,66 @@ docker run --rm --network none --mount 'type=bind,source=C:\Users\valerio\projec
 The cases include altered/missing date, offset, GPS and ICC, every EXIF
 orientation, absent/mismatched AVIF transforms, dimensions, YUV and color
 signals, MPF, textual/base64 motion/HDR markers and malformed binary metadata.
+
+## Opt-in persistent worker pool
+
+Add `--persistent-workers` to a future parent-controlled run to allocate exactly
+`--workers N` reusable Docker containers instead of starting one per conversion.
+The default command path remains `docker run --rm` and requires no migration.
+The converter script is unchanged; `--converter-script` works with either mode.
+This feature has not been adopted by the ongoing import or its supervisor.
+
+Each numbered slot runs at most one `docker exec` conversion at a time, with
+one CPU, 64 PIDs, networking disabled, and 1024 MiB memory including swap.
+Use `--pool-memory-mb` (128–4096) to change that per-container memory ceiling;
+`--worker-timeout-seconds` (1–3600, default 300) bounds each conversion attempt.
+The encoder remains jobs=1 at the same quality, speed and chroma settings.
+Eight idle containers still have overhead, and the aggregate memory allowance
+is N times the per-container limit. Neither a speedup nor a memory reduction
+has been established for this mode. The default importer already bounds the
+number of conversion jobs; a fixed pool alone is not proof of leak prevention.
+
+Pool names derive from the canonical state directory's SHA-256 and slot number.
+The existing exclusive `import.lock` is held throughout startup and cleanup.
+Before allocating anything, startup reconciles stale containers bearing the
+pool's exact kind/state/slot labels, including slots from a previously larger
+pool. New containers also carry a unique run label. Cleanup inspects ownership
+and removes by immutable Docker ID, never by broad name matching. Foreign or
+unverifiable containers are not removed and block startup. Do not manually
+launch two pools for one state directory or remove a live process's lock.
+
+A timeout or failed exec retires the entire slot container, killing any
+server-side encoder left behind by its Docker client. Explicit unsupported
+motion/HDR/MPF rejection is returned to the existing identity-fallback logic
+without replacement. A replacement starts at the same slot name only after
+removal succeeds and a fresh inspection confirms absence. Each slot permits
+two replacements over the entire run; lifecycle uncertainty or exhausted
+budget stops further scheduling. Startup failure, normal completion, SIGINT
+and SIGTERM clean only containers owned by that run. Active HTTP operations
+may finish before shutdown completes; their checkpoint logic is unchanged.
+
+Cleanup failure retains `import.lock` as a recovery fence and reports an error.
+After a forced kill, inspect the recorded PID and labelled slot containers;
+only when no importer owns the state may the parent release a stale lock and
+restart. Startup will reconcile its old containers before allocating new ones.
+An unavailable Docker daemon cannot be treated as confirmation of removal.
+
+Mounts use canonical paths: the selected sources' common directory is read-only,
+the state directory is writable, and an optional converter script is read-only.
+Filesystem-root mounts, source/stage overlap, scripts inside writable staging,
+comma-containing mount paths, and per-job paths escaping their roots are
+rejected. This requires a common non-root source directory; cross-drive
+manifests should be split into separate runs/state directories.
+
+Run fake-Docker lifecycle tests without starting containers:
+
+```powershell
+bun test scripts/storage-saver/import-camera.test.ts scripts/storage-saver/import-camera-pool.test.ts
+```
+
+Tests cover live-container bounds, repeated jobs, stale reconciliation, timeout
+and crash replacement ordering, replacement budgets, failed/unconfirmed removal,
+partial startup, ownership refusal and concurrent close. Native Docker pool
+startup, signal delivery and real conversion remain unvalidated; no second pool
+was launched alongside the CPU-saturated import. Parent review and a small
+isolated native smoke run are required before adopting the opt-in mode.
