@@ -51,8 +51,9 @@ Uploads include version-one `storage-saver-source` metadata. Existing metadata
 is compared field by field; it is never silently overwritten.
 
 Each uploaded asset must report the authenticated owner, an active trash state,
-the actual output checksum and exact server-computed file size. If extraction
-has not populated file size yet, a subsequent bounded retry checks it again.
+and the actual output checksum. Server-computed file size must match when it is
+available. Missing async metadata produces `server-checksum-pending-size`,
+awaiting independent filesystem verification; it does not exhaust upload retries.
 Bulk mode avoids full WAN downloads unless `--download-verify` is supplied.
 It writes records in state `uploaded`, pending independent server-side SHA-256
 verification by the parent. They must not be activated as verified aliases yet.
@@ -65,10 +66,16 @@ confirmed records to `verified`, and merges with existing records while the
 proxy is briefly stopped. Preserve existing source and asset mappings; reject
 conflicts. This importer does not replace the live ledger or rescan the API.
 
+Each successful file is journaled atomically in its `result.json` before progress
+is printed. A resumed upload validates the owner and source manifest hashes and
+reuses completed checkpoints without per-file API calls, including pending
+server verification. Use `--recheck` to explicitly revisit remote state. The
+parent can collect per-source results if interruption prevents final aggregation.
+
 Only one process can use a state directory. A forced termination can leave
 `import.lock`: inspect its PID and confirm no importer/container is running
-before removing that lock. Repeating the command rechecks current server state;
-it does not trust an old success to imply that the remote asset still exists.
+before removing that lock. Completed checkpoints describe the observed state at
+the time of import; final server verification remains the parent's responsibility.
 Do not delete staged output until the parent has completed verification/merge.
 
 Run importer tests with `bun test scripts/storage-saver/import-camera.test.ts`.

@@ -41,7 +41,7 @@ async function atomic(path:string, value:unknown) {
 export async function main(args=process.argv.slice(2)) {
   const options=new Map<string,string>();
   for(let i=0;i<args.length;i++) {if(!args[i].startsWith('--')) throw Error('Expected named option'); const k=args[i].slice(2);if(options.has(k))throw Error(`Duplicate option ${k}`); options.set(k,args[i+1]?.startsWith('--')||!args[i+1]?'true':args[++i]);}
-  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image'];
+  const allowed=['manifest','state','workers','limit','upload','bulk-reviewed','download-verify','image','recheck'];
   for(const k of options.keys()) if(!allowed.includes(k))throw Error(`Unknown option ${k}`);
   const required=(k:string)=>{const v=options.get(k);if(!v||v==='true')throw Error(`--${k} is required`);return v;};
   const manifest=resolve(required('manifest')), state=resolve(required('state'));
@@ -69,6 +69,15 @@ export async function main(args=process.argv.slice(2)) {
     const run=async(s:Source)=>{
       const dir=join(state,s.source_sha1); await mkdir(dir,{recursive:true});
       await checkSource(s);
+      if(upload&&!options.has('recheck')) {
+        let prior:any=null;try{prior=JSON.parse(await readFile(join(dir,'result.json'),'utf8'));}catch(e:any){if(e.code!=='ENOENT')throw e;}
+        if(prior) {
+          const r=object(prior.record);
+          if(r.owner_id!==owner||r.source_sha1!==s.source_sha1||r.source_size!==s.size_bytes||prior.source_sha256!==s.source_sha256||typeof r.asset_id!=='string'||!r.asset_id||!/^[a-f0-9]{40}$/.test(r.output_sha1)||!/^[a-f0-9]{64}$/.test(prior.output_sha256)||!Number.isSafeInteger(r.output_size)||r.output_size<1||!['uploaded','verified'].includes(r.state)||!['download-sha256','server-checksum-size','server-checksum-pending-size'].includes(prior.verification))throw Error('Completed checkpoint invalid or belongs to another owner/source');
+          if(r.state==='verified'&&prior.verification!=='download-sha256')throw Error('Invalid verified checkpoint evidence');
+          console.log(JSON.stringify({source:s.relative_path,assetId:r.asset_id,phase:'checkpoint',verification:prior.verification}));return;
+        }
+      }
       const checkpoint=join(dir,'prepared.json'); let p:Prepared;
       let existing:string|null=upload?await duplicate(s.source_sha1):null;
       if(existing) p={source:s,path:s.source_path,...await digest(s.source_path),filename:basename(s.source_path),preset:'identity',reason:'existing-original'};
@@ -105,7 +114,8 @@ export async function main(args=process.argv.slice(2)) {
       }
       const encoded=encodeURIComponent(id!); const asset=object(await json(`/api/assets/${encoded}`));
       const checksum=Buffer.from(p.sha1,'hex').toString('base64');
-      if(asset.ownerId!==owner||asset.isTrashed!==false||asset.checksum!==checksum||asset.exifInfo?.fileSizeInByte!==p.size)throw Error('Server owner/trash/checksum/size verification failed');
+      const serverSize=asset.exifInfo?.fileSizeInByte;
+      if(asset.ownerId!==owner||asset.isTrashed!==false||asset.checksum!==checksum||(serverSize!=null&&serverSize!==p.size))throw Error('Server owner/trash/checksum/size verification failed');
       const metadata=await json(`/api/assets/${encoded}/metadata`); if(!Array.isArray(metadata))throw Error('Invalid metadata response');
       const prev=metadata.filter((m:any)=>m.key===KEY);
       if(prev.length>1)throw Error('Duplicate provenance metadata');
@@ -119,14 +129,14 @@ export async function main(args=process.argv.slice(2)) {
         const value=object(saved.find((m:any)=>m.key===KEY).value);
         for(const [k,v] of Object.entries(provenance))if(value[k]!==v)throw Error(`Provenance readback mismatch: ${k}`);
       }
-      let verification='server-checksum-size';
+      let verification=serverSize==null?'server-checksum-pending-size':'server-checksum-size';
       if(verifyDownload) {
         const r=await request(`/api/assets/${encoded}/original`);const a=createHash('sha1'),b=createHash('sha256');let size=0;
         for await(const chunk of r.body!){a.update(chunk);b.update(chunk);size+=chunk.length;}
         if(a.digest('hex')!==p.sha1||b.digest('hex')!==p.sha256||size!==p.size)throw Error('Downloaded original mismatch'); verification='download-sha256';
       }
       const record={owner_id:owner,asset_id:id,source_sha1:s.source_sha1,output_sha1:p.sha1,source_filename:basename(s.source_path),output_filename:p.filename,preset:p.preset,state:verifyDownload?'verified':'uploaded',source_size:s.size_bytes,output_size:p.size,spool_path:'',updated_at:new Date().toISOString()};
-      await atomic(join(dir,'result.json'),{record,verification,source_sha256:s.source_sha256,output_sha256:p.sha256,reason:p.reason,original_path:asset.originalPath});
+      await atomic(join(dir,'result.json'),{record,verification,source_sha256:s.source_sha256,output_sha256:p.sha256,reason:p.reason,original_path:asset.originalPath??null,server_size:serverSize??null,exif:asset.exifInfo??null});
       console.log(JSON.stringify({source:s.relative_path,assetId:id,bytes:p.size,reason:p.reason,verification}));
     };
     await Promise.all(Array.from({length:workers},async()=>{
