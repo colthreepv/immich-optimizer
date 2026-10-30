@@ -2,17 +2,23 @@
 
 This describes the original-first path under development. It is intended for a single Immich owner, with one server and a pull worker. It does not import existing libraries or ledger entries in bulk.
 
-Original-first is opt-in; the existing storage-saver mode remains available. The planned Carlino server explicitly sets `IUO_ORIGINAL_FIRST=true`. The initial phone gate is a read-only check of settings and sync behavior. Keep `IUO_RETIRE_ORIGINAL` disabled until phone validation is complete. Before enabling it, turn off Sync Remote Deletions on every phone. In Immich Android 3.3.4, this setting is under Advanced. The server does not enforce the phone setting.
+Original-first is opt-in; the existing storage-saver mode remains available. The Carlino deployment sets `IUO_ORIGINAL_FIRST=true`. The initial phone gate is a read-only check of settings and sync behavior. Keep `IUO_RETIRE_ORIGINAL` disabled until phone validation is complete. Before enabling it, turn off Sync Remote Deletions on every phone. In Immich Android 3.3.4, this setting is under Advanced. The server does not enforce the phone setting.
 
-## Configuration
-
-The planned image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.3`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
+The release image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.3`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
 
 ## Release
 
-Create and push a new version tag, then publish its GitHub prerelease. The `published` release event starts validation and the image build. Wait for CI to pass and the tagged GHCR image to be available before deploying it. A push to `main` runs validation only; pushing a tag alone does not build the image.
+Create and push a new version tag, then publish its GitHub prerelease. The workflow is configured to run on the `published` release event, but automatic delivery of both push and release events has not been verified for this repository. Check the Actions run list before proceeding. A `main` push is configured for validation only; a tag push alone does not build the image.
 
-If the image for a version already exists, do not manually dispatch or republish that version to rebuild it. Use a new version tag for another build. Manual dispatch on a new tag remains available if automatic event delivery fails.
+If no automatic run appears and no run or image already exists for the tag, dispatch the workflow on that exact tag:
+
+```sh
+gh workflow run release.yaml -R colthreepv/immich-optimizer --ref v0.4.0-rc.4
+```
+
+Replace the example tag with the new release's tag. The RC3 manual run has already started; do not dispatch it again. Wait for validation and the image build to pass, then verify the tagged GHCR image is available before deploying. If a run is already in progress or the image exists, do not dispatch or republish that version to rebuild it; use a new version for another build.
+
+## Configuration
 
 Server settings for original-first mode:
 
@@ -50,7 +56,7 @@ The worker health endpoint is `http://127.0.0.1:8081/health`. `optimizer-worker 
 
 The server queues eligible JPEG uploads before forwarding originals to Immich. It acknowledges a successful new upload only with an actual Immich asset ID. If the queue cannot record that ID, the server logs deferred optimization and can reconcile the intent later. Other formats pass through as originals. The worker currently converts `.jpg` and `.jpeg` with `avif-q50-s6-420-v1`; unsupported content and output that is not smaller are skipped.
 
-With retirement disabled, worker claims are paused and source intents stay queued. With `IUO_RETIRE_ORIGINAL=true`, workers can process jobs and the publisher uploads the AVIF as a new asset, verifies it, migrates supported relationships and metadata, and records the original SHA-1 to replacement ID alias. After the ledger write, it requests a fresh Immich sync update for the replacement and records that step before trashing the original. Unsupported relationships or uncertain verification hold the job for review. Held jobs need separate review and resumption. Real Immich fixture validation is still pending.
+With retirement disabled, worker claims are paused and source intents stay queued. With `IUO_RETIRE_ORIGINAL=true`, workers can process jobs and the publisher uploads the AVIF as a new asset, verifies it, migrates supported relationships and metadata, and records the original SHA-1 to replacement ID alias. After the ledger write, it requests a fresh Immich sync update for the replacement and records that step before trashing the original. Unsupported relationships or uncertain verification hold the job for review. Held jobs need separate review and resumption. A synthetic fixture on Immich 3.3.5 has verified these steps; actual-device validation remains pending.
 
 The queue stores an atomically replaced JSON snapshot with a single writer, not SQLite. Use a local durable filesystem for the state directory. Cleanup releases terminal job spool bytes only after checking the active original in Immich for skipped or failed jobs, or the verified replacement for completed jobs. Held jobs retain their bytes for review. The default limits are 100 GiB of spool data and 10,000 historical jobs. Cleanup frees spool space but retains job records, so it does not free historical job slots. When admission fails, the server logs missed optimization and attempts a normal original upload to Immich.
 
