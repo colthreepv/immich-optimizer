@@ -6,27 +6,34 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
 
 	"github.com/spf13/viper"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/filesystem"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/immich"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/processor"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/proxy"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/watcher"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/port"
-	customlogger "github.com/miguelangel-nubla/immich-optimizer/internal/logger"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/usecase/pipeline"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/utils"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/filesystem"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/immich"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/processor"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/proxy"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/replacement"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/watcher"
+	"github.com/colthreepv/immich-optimizer/internal/coordinator"
+	"github.com/colthreepv/immich-optimizer/internal/domain/entity"
+	"github.com/colthreepv/immich-optimizer/internal/domain/port"
+	"github.com/colthreepv/immich-optimizer/internal/jobqueue"
+	customlogger "github.com/colthreepv/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/usecase/pipeline"
+	"github.com/colthreepv/immich-optimizer/internal/utils"
 )
 
 var (
@@ -80,6 +87,38 @@ func parseConfig(args []string) (*entity.AppConfig, bool, error) {
 
 	fs := flag.NewFlagSet("immich-optimizer", flag.ContinueOnError)
 	fs.StringVar(&ac.StateDir, "state_dir", os.Getenv("IUO_STATE_DIR"), "Persistent storage-saver state and staging directory (enables verified ingestion)")
+	originalFirst := false
+	if value := os.Getenv("IUO_ORIGINAL_FIRST"); value != "" {
+		var err error
+		originalFirst, err = strconv.ParseBool(value)
+		if err != nil {
+			return nil, false, fmt.Errorf("invalid IUO_ORIGINAL_FIRST: %w", err)
+		}
+	}
+	fs.BoolVar(&ac.OriginalFirst, "original_first", originalFirst, "Upload originals immediately and queue optimization")
+	retireOriginal := false
+	if value := os.Getenv("IUO_RETIRE_ORIGINAL"); value != "" {
+		var err error
+		retireOriginal, err = strconv.ParseBool(value)
+		if err != nil {
+			return nil, false, fmt.Errorf("invalid IUO_RETIRE_ORIGINAL: %w", err)
+		}
+	}
+	fs.BoolVar(&ac.RetireOriginal, "retire_original", retireOriginal, "Trash originals after verified replacement and metadata migration")
+	maxSpoolBytes, err := optionalIntEnv("IUO_QUEUE_MAX_SPOOL_BYTES")
+	if err != nil {
+		return nil, false, err
+	}
+	maxJobs, err := optionalIntEnv("IUO_QUEUE_MAX_JOBS")
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(int(maxJobs)) != maxJobs {
+		return nil, false, fmt.Errorf("IUO_QUEUE_MAX_JOBS exceeds platform integer range")
+	}
+	fs.Int64Var(&ac.QueueMaxSpoolBytes, "queue_max_spool_bytes", maxSpoolBytes, "Queue spool byte limit (0 uses default)")
+	fs.IntVar(&ac.QueueMaxJobs, "queue_max_jobs", int(maxJobs), "Queue job limit (0 uses default)")
+	fs.StringVar(&ac.WorkerBindAddr, "worker_bind_addr", envOr("IUO_WORKER_BIND_ADDR", ":8082"), "Address for the worker API")
 	fs.StringVar(&ac.PresetID, "preset_id", envOr("IUO_PRESET_ID", "avif-q50-s6-420-v1"), "Versioned conversion preset identifier")
 	fs.BoolVar(&ac.MobileView, "mobile_view", os.Getenv("IUO_MOBILE_VIEW") == "true", "Experimental original-checksum view for sync API responses")
 	fs.BoolVar(&ac.ShowVersion, "version", false, "Show the current version")
@@ -103,6 +142,16 @@ func parseConfig(args []string) (*entity.AppConfig, bool, error) {
 
 	if ac.ShowVersion {
 		return ac, true, nil
+	}
+
+	var secretErr error
+	ac.ImmichAPIKey, secretErr = secretFromFile(ac.ImmichAPIKey, "IUO_IMMICH_API_KEY_FILE")
+	if secretErr != nil {
+		return nil, false, secretErr
+	}
+	ac.WorkerToken, secretErr = secretFromFile(os.Getenv("IUO_WORKER_TOKEN"), "IUO_WORKER_TOKEN_FILE")
+	if secretErr != nil {
+		return nil, false, secretErr
 	}
 
 	if err := validateAppConfig(ac); err != nil {
@@ -141,9 +190,17 @@ func parseModes(modeStr string) (runWatcher bool, runProxy bool, err error) {
 }
 
 func validateAppConfig(ac *entity.AppConfig) error {
-	runWatcher, _, err := parseModes(ac.Mode)
+	runWatcher, runProxy, err := parseModes(ac.Mode)
 	if err != nil {
 		return err
+	}
+	if ac.OriginalFirst {
+		if !runProxy || ac.StateDir == "" || strings.TrimSpace(ac.ImmichAPIKey) == "" || strings.TrimSpace(ac.WorkerToken) == "" || strings.TrimSpace(ac.WorkerBindAddr) == "" {
+			return fmt.Errorf("original-first requires proxy mode, state_dir, an Immich API key, a worker token and a worker bind address")
+		}
+	}
+	if ac.QueueMaxSpoolBytes < 0 || ac.QueueMaxJobs < 0 {
+		return fmt.Errorf("queue limits cannot be negative")
 	}
 
 	if ac.ImmichURL == "" {
@@ -269,6 +326,10 @@ func run(args []string) error {
 	var watcherAdapter port.FileWatcher
 	var pipelineService *pipeline.Service
 	var proxyServer *proxy.Server
+	var workerServer *http.Server
+	var queueStore *jobqueue.Store
+	var publisherCancel context.CancelFunc
+	var publisherWG sync.WaitGroup
 
 	parsedImmichURL, urlErr := url.Parse(config.ImmichURL)
 	if urlErr != nil {
@@ -320,6 +381,45 @@ func run(args []string) error {
 				return fmt.Errorf("storage saver: %w", err)
 			}
 		}
+		if config.OriginalFirst {
+			queueStore, err = jobqueue.Open(filepath.Join(config.StateDir, "queue"), jobqueue.Options{MaxSpoolBytes: config.QueueMaxSpoolBytes, MaxJobs: config.QueueMaxJobs})
+			if err != nil {
+				return fmt.Errorf("open job queue: %w", err)
+			}
+			defer func() {
+				if publisherCancel != nil {
+					publisherCancel()
+				}
+				publisherWG.Wait()
+				_ = queueStore.Close()
+			}()
+			queue := proxy.OriginalFirstQueue{
+				Enqueue:              queueStore.Enqueue,
+				FindIntent:           queueStore.FindIntent,
+				MarkOriginalUploaded: func(id, asset string) error { _, err := queueStore.MarkOriginalUploaded(id, asset); return err },
+			}
+			if err := proxyServer.EnableOriginalFirst(queue, config.ImmichAPIKey); err != nil {
+				return fmt.Errorf("original-first: %w", err)
+			}
+			listener, err := net.Listen("tcp", config.WorkerBindAddr)
+			if err != nil {
+				return fmt.Errorf("worker listener: %w", err)
+			}
+			workerServer = &http.Server{Addr: config.WorkerBindAddr, Handler: &coordinator.WorkerHandler{Queue: queueStore, Token: config.WorkerToken, Paused: !config.RetireOriginal}, ReadHeaderTimeout: 10 * time.Second}
+			go func() {
+				if err := workerServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+					logger.Printf("Worker server error: %v", err)
+				}
+			}()
+			publisherCtx, cancel := context.WithCancel(context.Background())
+			publisherCancel = cancel
+			publisher := &coordinator.Publisher{Queue: queueStore, Ledger: proxyServer.StorageSaverStore(), Client: replacement.NewClient(config.ImmichURL, config.ImmichAPIKey, &http.Client{Timeout: time.Duration(config.HTTPTimeoutSeconds) * time.Second}), RetireOriginal: config.RetireOriginal, Logger: log.Default()}
+			publisher.ReconcileOriginal = func(ctx context.Context, job jobqueue.Job) (string, error) {
+				return proxyServer.ReconcileOriginalIntent(ctx, job, config.ImmichAPIKey)
+			}
+			publisherWG.Add(1)
+			go func() { defer publisherWG.Done(); publisher.Run(publisherCtx) }()
+		}
 		if err := proxyServer.Start(); err != nil {
 			return fmt.Errorf("error starting proxy server: %w", err)
 		}
@@ -329,12 +429,19 @@ func run(args []string) error {
 	<-sigChan
 
 	logger.Printf("Shutting down gracefully...")
+	if publisherCancel != nil {
+		publisherCancel()
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	done := make(chan struct{})
 	go func() {
+		publisherWG.Wait()
+		if workerServer != nil {
+			_ = workerServer.Shutdown(shutdownCtx)
+		}
 		if watcherAdapter != nil {
 			watcherAdapter.Stop()
 		}
@@ -362,6 +469,33 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func optionalIntEnv(key string) (int64, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+func secretFromFile(value, envKey string) (string, error) {
+	filename := os.Getenv(envKey)
+	if filename == "" {
+		return value, nil
+	}
+	if value != "" {
+		return "", fmt.Errorf("%s cannot be combined with its direct value", envKey)
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", envKey, err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func printVersion() string {

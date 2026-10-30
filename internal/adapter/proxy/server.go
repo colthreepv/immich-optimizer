@@ -19,10 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/port"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/logger"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/utils"
+	"github.com/colthreepv/immich-optimizer/internal/domain/entity"
+	"github.com/colthreepv/immich-optimizer/internal/domain/port"
+	"github.com/colthreepv/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/utils"
 )
 
 var errBlockedExtension = errors.New("blocked unmatched file extension")

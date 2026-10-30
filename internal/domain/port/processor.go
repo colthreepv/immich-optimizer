@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
+	"github.com/colthreepv/immich-optimizer/internal/domain/entity"
 )
 
 type MediaProcessor interface {

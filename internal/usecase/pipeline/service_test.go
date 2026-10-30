@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
-	customlogger "github.com/miguelangel-nubla/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/domain/entity"
+	customlogger "github.com/colthreepv/immich-optimizer/internal/logger"
 )
 
 type mockWatcher struct {
@@ -223,7 +223,7 @@ func TestShouldUploadProcessedFileNil(t *testing.T) {
 }
 
 type errorUploader struct {
-	failMap map[string]error
+	failMap  map[string]error
 	uploaded []string
 	sync.Mutex
 }
@@ -322,4 +322,3 @@ func TestPipelineServiceUploadQuotaExceededContinuesProcessing(t *testing.T) {
 		t.Errorf("Expected 2 files (file 2 and 3) to be removed after successful upload, got %d", removedCount)
 	}
 }
-

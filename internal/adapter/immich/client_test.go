@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	customlogger "github.com/miguelangel-nubla/immich-optimizer/internal/logger"
+	customlogger "github.com/colthreepv/immich-optimizer/internal/logger"
 )
 
 func TestUploadAssetWithFilenameSuccess(t *testing.T) {

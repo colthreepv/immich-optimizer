@@ -23,6 +23,9 @@ RUN go build \
     -o /out/immich-optimizer \
     ./cmd/optimizer
 
+RUN go build -buildvcs=false -trimpath -ldflags="-s -w" \
+    -o /out/optimizer-worker ./cmd/optimizer-worker
+
 FROM debian:trixie-slim
 
 ARG LIB_AVIF_VERSION=1.2.1-1.2
@@ -51,6 +54,8 @@ RUN groupadd --gid "${APP_UID}" immich-optimizer \
         /undone
 
 COPY --from=builder /out/immich-optimizer /usr/local/bin/immich-optimizer
+COPY --from=builder /out/optimizer-worker /usr/local/bin/optimizer-worker
+COPY LICENSE /usr/share/doc/immich-optimizer/LICENSE
 COPY --chmod=0755 scripts/storage-saver/quiet-exec scripts/storage-saver/jpeg-to-avif.sh scripts/storage-saver/video-candidate.sh /usr/local/bin/
 COPY --chown=immich-optimizer:immich-optimizer \
     config/storage-saver/tasks-avif-q50-s6-420-v1.yaml \

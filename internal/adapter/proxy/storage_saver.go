@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/mobileview"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/adapter/state"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/mobileview"
+	"github.com/colthreepv/immich-optimizer/internal/adapter/state"
 )
 
 const provenanceKey = "storage-saver-source"

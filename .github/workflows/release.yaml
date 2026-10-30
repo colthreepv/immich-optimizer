@@ -1,65 +1,124 @@
-name: Release
+name: Validate and build image
 
 on:
   pull_request:
   push:
+    branches:
+      - main
     tags:
-      - '*'
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  release:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          fetch-depth: 0
-          
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-          check-latest: true
+          go-version-file: go.mod
           cache: true
-          
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-            
-      - name: Run quality checks
+      - name: Verify, vet, and test
         run: |
+          test -z "$(gofmt -l cmd internal)"
           go mod verify
           go vet ./...
-          go test -v ./...
-          
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        
+          go test -race ./...
+
+  image:
+    if: github.event_name == 'pull_request' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            echo 'value=dev' >> "$GITHUB_OUTPUT"
+          elif [[ "$REF_TYPE" == tag && "$REF_NAME" == v* ]]; then
+            echo "value=$REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo 'Select a v-prefixed tag when running this workflow manually.' >&2
+            exit 1
+          fi
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.storage-saver
+          platforms: linux/amd64
+          load: true
+          tags: immich-optimizer:ci
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.version.outputs.date }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.created=${{ steps.version.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test binaries and AVIF preset
+        run: |
+          docker run --rm --entrypoint bash -e QUIET_EXEC_SENSOR_ENABLED=0 immich-optimizer:ci -c '
+            set -euo pipefail
+            immich-optimizer -version
+            optimizer-worker version
+            IUO_SERVER_URL=http://127.0.0.1:9 IUO_WORKER_TOKEN=smoke IUO_WORKER_ID=smoke optimizer-worker &
+            worker_pid=$!
+            trap "kill $worker_pid 2>/dev/null || true; wait $worker_pid 2>/dev/null || true" EXIT
+            healthy=0
+            for attempt in {1..20}; do
+              if optimizer-worker health; then healthy=1; break; fi
+              sleep 0.5
+            done
+            test "$healthy" = 1
+            kill "$worker_pid"
+            wait "$worker_pid"
+            trap - EXIT
+            test "$(dpkg-query -W -f="\${Version}" libavif-bin)" = 1.2.1-1.2
+            test -s /usr/share/doc/immich-optimizer/LICENSE
+            tmp=$(mktemp -d)
+            trap "rm -rf $tmp" EXIT
+            ffmpeg -loglevel error -f lavfi -i color=red:s=32x32 -frames:v 1 -threads 1 "$tmp/input.jpg"
+            jpeg-to-avif.sh "$tmp/input.jpg" "$tmp/output.avif"
+            test -s "$tmp/output.avif"
+          '
+      - name: Test shell helpers in image
+        run: |
+          docker run --rm --entrypoint bash \
+            --mount "type=bind,source=$PWD/scripts/storage-saver,target=/tests,readonly" \
+            -e QUIET_EXEC_BIN=/usr/local/bin/quiet-exec immich-optimizer:ci -c '
+              set -euo pipefail
+              bash /tests/quiet-exec.test.sh
+              bash /tests/import-camera-convert.test.sh
+            '
       - name: Login to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v5
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+      - name: Push tested image
+        if: github.event_name != 'pull_request'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          image="ghcr.io/colthreepv/immich-optimizer:$IMAGE_VERSION"
+          docker tag immich-optimizer:ci "$image"
+          docker push "$image"

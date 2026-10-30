@@ -5,8 +5,8 @@ package watcher
 import (
 	"fmt"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/port"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/domain/port"
+	"github.com/colthreepv/immich-optimizer/internal/logger"
 )
 
 func NewInotifyWatcher(watchDir string, log *logger.Logger, bufferSize int) (port.FileWatcher, error) {

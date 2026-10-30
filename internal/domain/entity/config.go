@@ -12,6 +12,12 @@ type Config struct {
 
 type AppConfig struct {
 	StateDir              string
+	OriginalFirst         bool
+	RetireOriginal        bool
+	QueueMaxSpoolBytes    int64
+	QueueMaxJobs          int
+	WorkerToken           string
+	WorkerBindAddr        string
 	PresetID              string
 	MobileView            bool
 	ShowVersion           bool

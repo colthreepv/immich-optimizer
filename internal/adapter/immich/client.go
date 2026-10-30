@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/port"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/logger"
-	"github.com/miguelangel-nubla/immich-optimizer/internal/utils"
+	"github.com/colthreepv/immich-optimizer/internal/domain/port"
+	"github.com/colthreepv/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/utils"
 )
 
 type client struct {

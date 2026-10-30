@@ -1,5 +1,10 @@
 # Workstation Camera import
 
+This is the legacy workstation experiment. It bypasses server-side conversion
+and is not the ingestion path for the server/worker release. The experiment was
+stopped; use the original-first proxy described in [async optimizer](async-optimizer.md).
+The commands below remain as a record of the experiment.
+
 Run `scripts/storage-saver/import-camera.ts` with Bun on Bangkokian. Originals
 remain in place and are mounted read-only into isolated Docker converters.
 No source backup, proxy configuration change, or live ledger mutation occurs.

@@ -1,6 +1,6 @@
 package port
 
-import "github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
+import "github.com/colthreepv/immich-optimizer/internal/domain/entity"
 
 type FileWatcher interface {
 	Events() <-chan entity.FileEvent

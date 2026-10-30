@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/port"
+	"github.com/colthreepv/immich-optimizer/internal/domain/port"
 )
 
 type localFileSystem struct {

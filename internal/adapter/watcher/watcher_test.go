@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	customlogger "github.com/miguelangel-nubla/immich-optimizer/internal/logger"
+	customlogger "github.com/colthreepv/immich-optimizer/internal/logger"
 )
 
 func TestNewInotifyWatcher(t *testing.T) {
@@ -28,4 +28,3 @@ func TestNewInotifyWatcher(t *testing.T) {
 		}
 	}
 }
-

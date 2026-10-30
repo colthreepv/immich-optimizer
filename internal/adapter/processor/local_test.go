@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/miguelangel-nubla/immich-optimizer/internal/domain/entity"
-	customlogger "github.com/miguelangel-nubla/immich-optimizer/internal/logger"
+	"github.com/colthreepv/immich-optimizer/internal/domain/entity"
+	customlogger "github.com/colthreepv/immich-optimizer/internal/logger"
 )
 
 func TestLocalProcessor(t *testing.T) {
