@@ -6,7 +6,7 @@ Original-first is opt-in; the existing storage-saver mode remains available. The
 
 ## Configuration
 
-The planned image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.1`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
+The planned image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.2`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
 
 Server settings for original-first mode:
 

@@ -44,6 +44,8 @@ type publisherFixture struct {
 	uploaded, copied, updated, trashed bool
 	outputPending                      bool
 	failRepublish                      bool
+	sharedPreviewID                    string
+	omitSharedOutput                   bool
 	targetMetadata                     map[string]map[string]any
 }
 
@@ -165,11 +167,18 @@ func (f *publisherFixture) serve(w http.ResponseWriter, r *http.Request) {
 			write([]any{})
 		}
 	case "GET /api/shared-links":
+		preview := f.sharedPreviewID
+		if preview == "" {
+			preview = "original"
+		}
+		// Immich's list contains only a preview, even after copying the link.
+		write([]any{map[string]any{"id": "shared", "type": "INDIVIDUAL", "assets": []any{map[string]any{"id": preview}}}})
+	case "GET /api/shared-links/shared":
 		assets := []any{map[string]any{"id": "original"}}
-		if f.copied {
+		if f.copied && !f.omitSharedOutput {
 			assets = append(assets, map[string]any{"id": "output"})
 		}
-		write([]any{map[string]any{"id": "shared", "assets": assets}})
+		write(map[string]any{"id": "shared", "type": "INDIVIDUAL", "assets": assets})
 	case "GET /api/assets/original/metadata":
 		write([]any{map[string]any{"key": "user-note", "value": map[string]any{"nested": map[string]any{"label": "hello"}}}})
 	case "GET /api/assets/output/metadata":
@@ -387,6 +396,50 @@ func TestPublisherHappyPathPersistsMappingBeforeTrash(t *testing.T) {
 	}
 	if got, ok := ledger.FindSource(legacy.OwnerID, legacy.SourceSHA1); !ok || !reflect.DeepEqual(got, legacy) {
 		t.Fatal("legacy import mapping changed", got, ok)
+	}
+}
+
+func TestPublisherChecksFullSharedLinkWhenPreviewHidesOriginal(t *testing.T) {
+	for _, missingOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing_output_%v", missingOutput), func(t *testing.T) {
+			f := newPublisherFixture(t)
+			f.mu.Lock()
+			f.sharedPreviewID = "unrelated"
+			f.omitSharedOutput = missingOutput
+			f.mu.Unlock()
+			err := f.publisher.Process(context.Background(), f.job)
+			if missingOutput {
+				if err == nil || errors.Is(err, replacement.ErrBlocked) || !strings.Contains(err.Error(), "shared link") {
+					t.Fatal("unrelated preview hid an unmigrated link", err)
+				}
+				j, getErr := f.queue.Get(f.job.ID)
+				if getErr != nil || j.PublicationStage != jobqueue.StageVerified || j.SyncRepublished {
+					t.Fatal("unmigrated link advanced publication", j, getErr)
+				}
+				if len(f.ledger.Records()) != 0 {
+					t.Fatal("unmigrated link committed an alias")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.assertCompleted()
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			readDetail := false
+			for _, request := range f.requests {
+				if request == "GET /api/shared-links/shared" {
+					readDetail = true
+				}
+			}
+			if !readDetail {
+				t.Fatal("publisher trusted the shared-link preview", f.requests)
+			}
+			if missingOutput && (f.trashed || f.republishAttempts != 0) {
+				t.Fatal("unmigrated link reached retirement", f.requests)
+			}
+		})
 	}
 }
 

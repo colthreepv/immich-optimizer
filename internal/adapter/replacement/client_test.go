@@ -24,6 +24,11 @@ type fixture struct {
 	mu                                                                                        sync.Mutex
 	sourceMeta, targetMeta                                                                    map[string]map[string]any
 	outputOwner                                                                               string
+	linkAssets                                                                                []string
+	linkPreview                                                                               string
+	linkCopyMissing                                                                           bool
+	linkDetailError                                                                           bool
+	linkHideOutputReads                                                                       int
 	outputTrashed, outputOffline, outputFavorite, omitFavorite                                bool
 	republished                                                                               []bool
 	dropMetaWrite, offline, missingOriginal, sourcePending, outputPending                     bool
@@ -201,6 +206,17 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 			f.t.Error("stack must be false")
 		}
 		f.copied = true
+		if !f.linkCopyMissing && len(f.linkAssets) > 0 {
+			found := false
+			for _, v := range f.linkAssets {
+				if v == "output" {
+					found = true
+				}
+			}
+			if !found {
+				f.linkAssets = append(f.linkAssets, "output")
+			}
+		}
 		w.WriteHeader(204)
 	case "PUT /api/assets":
 		f.updated = true
@@ -214,7 +230,31 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 			write([]any{})
 		}
 	case "GET /api/shared-links":
-		write([]any{})
+		if f.linkAssets == nil {
+			write([]any{})
+			break
+		}
+		preview := f.linkAssets[0]
+		if f.linkPreview != "" {
+			preview = f.linkPreview
+		}
+		write([]any{map[string]any{"id": "link", "type": "INDIVIDUAL", "assets": []any{map[string]any{"id": preview}}}})
+	case "GET /api/shared-links/link":
+		if f.linkDetailError {
+			http.Error(w, "not found", 404)
+			break
+		}
+		assets := []any{}
+		for _, v := range f.linkAssets {
+			if v == "output" && f.linkHideOutputReads > 0 {
+				continue
+			}
+			assets = append(assets, map[string]any{"id": v, "ownerId": "owner", "checksum": "fixture"})
+		}
+		if f.copied && f.linkHideOutputReads > 0 {
+			f.linkHideOutputReads--
+		}
+		write(map[string]any{"id": "link", "type": "INDIVIDUAL", "assets": assets})
 	case "GET /api/server/features":
 		write(map[string]any{"trash": true})
 	case "DELETE /api/assets":
@@ -634,6 +674,105 @@ func TestRepublishPreservesFavoriteAndChecksOwner(t *testing.T) {
 					t.Errorf("favorite writes: %v", f.republished)
 				}
 			})
+		})
+	}
+}
+
+func TestSharedLinkListPreviewUsesFullDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		assets  []string
+		preview string
+	}{
+		{"preview original", []string{"original"}, "original"},
+		{"preview output after prior copy", []string{"output", "original"}, "output"},
+		{"preview unrelated", []string{"unrelated", "original"}, "unrelated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, c := newFixture(t)
+			f.locked(func() { f.linkAssets = tc.assets; f.linkPreview = tc.preview })
+			ctx := context.Background()
+			r, e := c.Publish(ctx, f.input, f.checkpoint)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = c.Retire(ctx, f.input, r, true); e != nil {
+				t.Fatal(e)
+			}
+			if !f.wasTrashed() {
+				t.Fatal("verified original not trashed")
+			}
+			calls := 0
+			for _, req := range f.requestList() {
+				if req == "GET /api/shared-links/link" {
+					calls++
+				}
+			}
+			if calls < 3 {
+				t.Fatalf("expected pre/post/retirement details; got %d", calls)
+			}
+		})
+	}
+}
+func TestSharedLinkMissingOutputRetriesAndKeepsOriginal(t *testing.T) {
+	f, c := newFixture(t)
+	f.locked(func() { f.linkAssets = []string{"original"}; f.linkCopyMissing = true })
+	ctx := context.Background()
+	r, e := c.Publish(ctx, f.input, f.checkpoint)
+	if e == nil || errors.Is(e, ErrBlocked) || f.wasTrashed() {
+		t.Fatalf("expected retryable missing detail; got %v", e)
+	}
+	if r.OutputAssetID != "output" || !reflect.DeepEqual(f.stageList(), []Stage{StageUploaded, StageVerified}) {
+		t.Fatalf("unexpected checkpoint: %+v %v", r, f.stageList())
+	}
+	f.locked(func() { f.linkCopyMissing = false })
+	in := f.input
+	in.OutputAssetID = r.OutputAssetID
+	if _, e = c.Publish(ctx, in, f.checkpoint); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestSharedLinkDetailVisibilityRetriesBoundedly(t *testing.T) {
+	f, c := newFixture(t)
+	f.locked(func() { f.linkAssets = []string{"original"}; f.linkHideOutputReads = 2 })
+	if _, e := c.Publish(context.Background(), f.input, f.checkpoint); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestSharedLinkDetailReadFailureKeepsOriginal(t *testing.T) {
+	f, c := newFixture(t)
+	f.locked(func() { f.linkAssets = []string{"original"}; f.linkDetailError = true })
+	_, e := c.Publish(context.Background(), f.input, f.checkpoint)
+	if e == nil || f.wasTrashed() {
+		t.Fatalf("expected detail error: %v", e)
+	}
+}
+func TestSharedLinkNative335PayloadPreviewIsNotMembership(t *testing.T) {
+	const source = "c4628b0e-6a3e-4c05-b618-be92114281cb"
+	const output = "2a79c405-0572-4159-aa29-648852e17ce9"
+	const link = "d3c591c3-df11-44ff-8a9a-76324cfbe7a8"
+	for _, preview := range []string{source, output} {
+		t.Run(preview, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/shared-links":
+					fmt.Fprintf(w, `[{"id":%q,"type":"INDIVIDUAL","assets":[{"id":%q}]}]`, link, preview)
+				case "/api/shared-links/" + link:
+					fmt.Fprintf(w, `{"id":%q,"type":"INDIVIDUAL","assets":[{"id":%q,"ownerId":"owner","checksum":"base64"},{"id":%q,"ownerId":"owner","checksum":"base64"}]}`, link, source, output)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			c := NewClient(server.URL, "key", server.Client())
+			ids, e := c.originalSharedLinks(context.Background(), source)
+			if e != nil || !reflect.DeepEqual(ids, []string{link}) {
+				t.Fatalf("discovery %v %v", ids, e)
+			}
+			if e = c.verifySharedLinks(context.Background(), ids, source, output); e != nil {
+				t.Fatal(e)
+			}
 		})
 	}
 }

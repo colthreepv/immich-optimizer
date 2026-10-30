@@ -581,12 +581,109 @@ func (c *Client) verifyCustomMetadata(ctx context.Context, sourceID, targetID st
 	}
 	return nil
 }
+
+// Immich 3.3.5's list endpoint returns at most one preview asset per link.
+// Only the detail endpoint returns the full active, EXIF-ready asset set.
+type sharedLink struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Assets []struct {
+		ID string `json:"id"`
+	} `json:"assets"`
+}
+
+func (c *Client) sharedLinkDetail(ctx context.Context, id string) (sharedLink, error) {
+	var link sharedLink
+	if e := c.json(ctx, "GET", "/shared-links/"+pathID(id), nil, &link); e != nil {
+		return link, e
+	}
+	if link.ID != id || link.Type != "INDIVIDUAL" || link.Assets == nil {
+		return link, blocked("invalid individual shared link detail")
+	}
+	for _, a := range link.Assets {
+		if a.ID == "" {
+			return link, blocked("invalid shared link asset")
+		}
+	}
+	return link, nil
+}
+func linkContains(link sharedLink, id string) bool {
+	for _, a := range link.Assets {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Discover from all individual link details, never from the truncated previews.
+func (c *Client) originalSharedLinks(ctx context.Context, source string) ([]string, error) {
+	var links []sharedLink
+	if e := c.json(ctx, "GET", "/shared-links", nil, &links); e != nil {
+		return nil, e
+	}
+	if links == nil {
+		return nil, blocked("invalid shared link list")
+	}
+	seen := map[string]bool{}
+	ids := []string{}
+	for _, preview := range links {
+		if preview.ID == "" || seen[preview.ID] {
+			return nil, blocked("invalid shared link list")
+		}
+		seen[preview.ID] = true
+		switch preview.Type {
+		case "ALBUM":
+			continue
+		case "INDIVIDUAL":
+		default:
+			return nil, blocked("unknown shared link type")
+		}
+		detail, e := c.sharedLinkDetail(ctx, preview.ID)
+		if e != nil {
+			return nil, e
+		}
+		if linkContains(preview, source) && !linkContains(detail, source) {
+			return nil, fmt.Errorf("shared link %s source detail not ready", preview.ID)
+		}
+		if linkContains(detail, source) {
+			ids = append(ids, preview.ID)
+		}
+	}
+	return ids, nil
+}
+
+// The full detail query joins EXIF rows. Retry briefly and return a retryable
+// error if either asset is not yet visible; never infer absence from previews.
+func (c *Client) verifySharedLinks(ctx context.Context, ids []string, source, target string) error {
+	for _, id := range ids {
+		ready := false
+		for attempt := 0; attempt < 3; attempt++ {
+			detail, e := c.sharedLinkDetail(ctx, id)
+			if e != nil {
+				return e
+			}
+			if linkContains(detail, source) && linkContains(detail, target) {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			return fmt.Errorf("shared link %s asset details not ready or membership missing", id)
+		}
+	}
+	return nil
+}
 func (c *Client) migrate(ctx context.Context, in Input, id string) error {
 	a, e := c.original(ctx, in)
 	if e != nil {
 		return e
 	}
 	albums, e := c.albums(ctx, in.OriginalAssetID)
+	if e != nil {
+		return e
+	}
+	links, e := c.originalSharedLinks(ctx, in.OriginalAssetID)
 	if e != nil {
 		return e
 	}
@@ -597,6 +694,9 @@ func (c *Client) migrate(ctx context.Context, in Input, id string) error {
 	// is intentionally disabled because asynchronous extraction can overwrite edits.
 	copyBody := map[string]any{"sourceId": in.OriginalAssetID, "targetId": id, "albums": true, "favorite": true, "sharedLinks": true, "sidecar": false, "stack": false}
 	if e = c.json(ctx, "PUT", "/assets/copy", copyBody, nil); e != nil {
+		return e
+	}
+	if e = c.verifySharedLinks(ctx, links, in.OriginalAssetID, id); e != nil {
 		return e
 	}
 	update := map[string]any{"ids": []string{id}, "isFavorite": a.IsFavorite, "visibility": a.Visibility}
@@ -691,30 +791,11 @@ func (c *Client) verifyRelations(ctx context.Context, in Input, id string) error
 			return blocked("album %s still uses original cover", al.ID)
 		}
 	}
-	var links []struct {
-		ID     string `json:"id"`
-		Assets []struct {
-			ID string `json:"id"`
-		} `json:"assets"`
+	links, e := c.originalSharedLinks(ctx, in.OriginalAssetID)
+	if e != nil {
+		return e
 	}
-	if e = c.json(ctx, "GET", "/shared-links", nil, &links); e != nil {
-		return blocked("cannot inspect shared links: %v", e)
-	}
-	for _, link := range links {
-		var orig, out bool
-		for _, v := range link.Assets {
-			if v.ID == in.OriginalAssetID {
-				orig = true
-			}
-			if v.ID == id {
-				out = true
-			}
-		}
-		if orig && !out {
-			return blocked("shared link %s missing output", link.ID)
-		}
-	}
-	return nil
+	return c.verifySharedLinks(ctx, links, in.OriginalAssetID, id)
 }
 
 // Publish uploads, verifies and migrates. Every callback must durably commit its
