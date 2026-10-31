@@ -1,0 +1,48 @@
+name: immich-optimizer-worker
+
+services:
+  worker-scratch-init:
+    image: "${IUO_WORKER_IMAGE:-ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.6}"
+    user: "0:0"
+    command: ["sh", "-c", "chown 1000:1000 /work"]
+    volumes:
+      - worker-scratch:/work
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  worker:
+    image: "${IUO_WORKER_IMAGE:-ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.6}"
+    command: ["optimizer-worker", "-temp-dir", "/work"]
+    depends_on:
+      worker-scratch-init:
+        condition: service_completed_successfully
+    environment:
+      IUO_SERVER_URL: "${IUO_SERVER_URL:?set IUO_SERVER_URL to the private worker API URL}"
+      IUO_WORKER_ID: "${IUO_WORKER_ID:-bangkokian-1}"
+      IUO_WORKER_TOKEN_FILE: /run/secrets/worker-token
+      AVIF_JOBS: "1"
+      QUIET_EXEC_SENSOR_ENABLED: "0"
+      GODEBUG: "${IUO_WORKER_GODEBUG:-}"
+    secrets:
+      - source: worker-token
+        target: worker-token
+    volumes:
+      - worker-scratch:/work
+    healthcheck:
+      test: ["CMD", "optimizer-worker", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    mem_limit: 2g
+    pids_limit: 128
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+secrets:
+  worker-token:
+    file: "${IUO_WORKER_TOKEN_PATH:?set IUO_WORKER_TOKEN_PATH to the worker token file}"
+
+volumes:
+  worker-scratch:

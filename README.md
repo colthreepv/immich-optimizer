@@ -14,6 +14,8 @@ The server's public proxy listens on port 8080 by default. Its separate worker A
 
 See [architecture](ARCHITECTURE.md) for the data flow and [async optimizer](docs/async-optimizer.md) for configuration and current limits.
 
+Remote conversion workers can use the persistent [worker Compose configuration](compose.worker.yaml). See the [remote-worker guide](docs/remote-worker.md) for private API access, token configuration and resource limits.
+
 ## License and attribution
 
 This project builds on [miguelangel-nubla/immich-optimizer](https://github.com/miguelangel-nubla/immich-optimizer). The original copyright notice and MIT terms remain in [LICENSE](LICENSE).
