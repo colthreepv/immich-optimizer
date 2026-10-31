@@ -18,7 +18,9 @@ func TestEquivalentCaptureTimeZone(t *testing.T) {
 		{"DST summer", "UTC-4", "America/New_York", "2025-07-15T21:59:28-04:00", true},
 		{"UTC", "UTC", "Etc/UTC", "2025-02-15T21:59:28Z", true},
 		{"wrong zone", "UTC+7", "Asia/Tokyo", "2025-02-15T21:59:28+07:00", false},
-		{"wrong timestamp offset", "UTC+7", "Asia/Bangkok", "2025-02-15T21:59:28Z", false},
+		{"UTC serialized capture", "UTC+7", "Asia/Bangkok", "2025-02-15T14:21:59.852+00:00", true},
+		{"UTC Z serialized capture", "UTC+7", "Asia/Bangkok", "2025-02-15T14:21:59.852Z", true},
+		{"unrelated timestamp offset", "UTC+7", "Asia/Bangkok", "2025-02-15T21:59:28+09:00", false},
 		{"wrong DST season", "UTC-5", "America/New_York", "2025-07-15T21:59:28-05:00", false},
 		{"distinct IANA zones", "Europe/Rome", "Europe/Berlin", "2025-02-15T21:59:28+01:00", false},
 		{"IANA loss", "Asia/Bangkok", "UTC+7", "2025-02-15T21:59:28+07:00", false},
@@ -46,14 +48,18 @@ func TestEquivalentCaptureTimeZone(t *testing.T) {
 }
 
 func TestPublishAndRetireWithNormalizedCaptureTimeZone(t *testing.T) {
-	for _, target := range []string{"Asia/Bangkok", "Asia/Tokyo", "Europe/Berlin"} {
-		t.Run(target, func(t *testing.T) {
+	for _, tc := range []struct{ target, date string }{
+		{"Asia/Bangkok", "2025-02-15T21:59:28.325+07:00"},
+		{"Asia/Bangkok", "2025-02-15T14:21:59.852+00:00"},
+		{"Asia/Tokyo", "2025-02-15T21:59:28.325+07:00"},
+		{"Europe/Berlin", "2025-02-15T21:59:28.325+07:00"},
+	} {
+		t.Run(tc.target+tc.date, func(t *testing.T) {
 			f, c := newFixture(t)
-			date := "2025-02-15T21:59:28.325+07:00"
-			f.sourceExif = map[string]any{"timeZone": "UTC+7", "dateTimeOriginal": date}
-			f.outputExif = map[string]any{"timeZone": target, "dateTimeOriginal": date}
+			f.sourceExif = map[string]any{"timeZone": "UTC+7", "dateTimeOriginal": tc.date}
+			f.outputExif = map[string]any{"timeZone": tc.target, "dateTimeOriginal": tc.date}
 			r, err := c.Publish(context.Background(), f.input, f.checkpoint)
-			if target != "Asia/Bangkok" {
+			if tc.target != "Asia/Bangkok" {
 				if !errors.Is(err, ErrBlocked) || f.wasTrashed() {
 					t.Fatalf("unsafe timezone migration: err=%v trashed=%v", err, f.wasTrashed())
 				}

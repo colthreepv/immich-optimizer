@@ -11,7 +11,8 @@ var fixedCaptureZone = regexp.MustCompile(`^UTC([+-])(\d{1,2})(?::([0-5]\d))?$`)
 
 // Immich can normalize a JPEG's fixed-offset label to an IANA zone on AVIF
 // extraction. Accept that upgrade only when the unchanged capture timestamp's
-// offset matches both labels. Distinct source IANA zones remain significant.
+// offset matches both labels. Immich may serialize that instant in UTC while
+// keeping its display zone separately. Distinct source IANA zones remain significant.
 func equivalentCaptureTimeZone(source, target map[string]any) bool {
 	sourceZone, ok := source["timeZone"].(string)
 	if !ok {
@@ -42,7 +43,7 @@ func equivalentCaptureTimeZone(source, target map[string]any) bool {
 		return false
 	}
 	_, offset := capture.Zone()
-	if offset != seconds {
+	if offset != 0 && offset != seconds {
 		return false
 	}
 	targetZone, ok := target["timeZone"].(string)
