@@ -33,7 +33,7 @@ type fixture struct {
 	outputTrashed, outputOffline, outputFavorite, omitFavorite                                bool
 	republished                                                                               []bool
 	dropMetaWrite, offline, missingOriginal, sourcePending, outputPending                     bool
-	faces, people                                                                             []any
+	faces, people, outputPeople                                                               []any
 	t                                                                                         *testing.T
 	input                                                                                     Input
 	uploaded, copied, updated, trashed, badDownload, lostACK, lostDeleteACK, edited, activity bool
@@ -127,6 +127,9 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 		if f.outputPending {
 			a["exifInfo"] = map[string]any{}
 			a["width"] = nil
+		}
+		if f.outputPeople != nil {
+			a["people"] = f.outputPeople
 		}
 		write(a)
 	case "PUT /api/assets/output":
@@ -470,24 +473,66 @@ func TestCustomMetadataMissingOrConflictingBlocks(t *testing.T) {
 }
 
 func TestFaceSafety(t *testing.T) {
+	person := func(id string) map[string]any {
+		return map[string]any{"id": id, "name": "", "isHidden": false}
+	}
+	assigned := func(p map[string]any) map[string]any {
+		return map[string]any{"sourceType": "machine-learning", "personId": nil, "person": p}
+	}
+	unnamed := person("person")
+	named := person("person")
+	named["name"] = "Alice"
+	extended := map[string]any{
+		"id": "person", "name": "", "birthDate": nil, "thumbnailPath": "/person.jpg",
+		"isHidden": false, "updatedAt": "2026-10-31T00:00:00Z", "isFavorite": false,
+		"color": nil, "otherPeople": []any{}, "sharedBy": []any{}, "sharedWith": []any{},
+	}
+	people := []any{unnamed}
 	tests := []struct {
 		name    string
 		faces   []any
 		people  []any
 		allowed bool
 	}{
+		{"assigned unnamed machine-learning", []any{assigned(unnamed)}, people, true},
+		{"face omits default person metadata", []any{assigned(map[string]any{"id": "person", "name": ""})}, people, true},
+		{"assigned unnamed without personId", []any{map[string]any{"sourceType": "machine-learning", "person": unnamed}}, people, true},
+		{"same unnamed group on multiple faces", []any{assigned(unnamed), assigned(unnamed)}, people, true},
+		{"assigned and unassigned machine-learning", []any{assigned(unnamed), map[string]any{"sourceType": "machine-learning", "person": nil, "personId": nil}}, people, true},
+		{"extended automatic metadata", []any{assigned(extended)}, []any{extended}, true},
 		{"unassigned machine-learning", []any{map[string]any{"sourceType": "machine-learning", "person": nil}}, nil, true},
 		{"unassigned machine-learning null personId", []any{map[string]any{"sourceType": "machine-learning", "person": nil, "personId": nil}}, nil, true},
 		{"manual", []any{map[string]any{"sourceType": "manual", "person": nil}}, nil, false},
-		{"named person", []any{map[string]any{"sourceType": "machine-learning", "person": map[string]any{"id": "person", "name": "Alice"}}}, nil, false},
-		{"personId assigned", []any{map[string]any{"sourceType": "machine-learning", "person": nil, "personId": "person"}}, nil, false},
-		{"asset people assigned", []any{map[string]any{"sourceType": "machine-learning", "person": nil}}, []any{map[string]any{"id": "person", "name": "Alice"}}, false},
+		{"manual assigned", []any{map[string]any{"sourceType": "manual", "person": unnamed}}, people, false},
+		{"named person", []any{assigned(named)}, []any{named}, false},
+		{"personId assigned", []any{map[string]any{"sourceType": "machine-learning", "person": unnamed, "personId": "person"}}, people, false},
 		{"exif", []any{map[string]any{"sourceType": "exif", "person": nil}}, nil, false},
 		{"unknown source", []any{map[string]any{"sourceType": "other", "person": nil}}, nil, false},
 		{"missing source", []any{map[string]any{"person": nil}}, nil, false},
 		{"missing person", []any{map[string]any{"sourceType": "machine-learning"}}, nil, false},
 		{"invalid face", []any{nil}, nil, false},
 		{"invalid response", nil, nil, false},
+		{"assigned face missing asset people", []any{assigned(unnamed)}, nil, false},
+		{"asset person missing from faces", []any{map[string]any{"sourceType": "machine-learning", "person": nil}}, people, false},
+		{"inconsistent person IDs", []any{assigned(person("face-person"))}, people, false},
+		{"duplicate asset people", []any{assigned(unnamed)}, []any{unnamed, unnamed}, false},
+		{"invalid asset person", []any{assigned(unnamed)}, []any{nil}, false},
+		{"person missing id", []any{assigned(map[string]any{"name": ""})}, []any{map[string]any{"name": ""}}, false},
+		{"person missing name", []any{assigned(map[string]any{"id": "person"})}, []any{map[string]any{"id": "person"}}, false},
+		{"null person name", []any{assigned(map[string]any{"id": "person", "name": nil})}, []any{map[string]any{"id": "person", "name": nil}}, false},
+		{"null hidden person", []any{assigned(map[string]any{"id": "person", "name": "", "isHidden": nil})}, []any{map[string]any{"id": "person", "name": "", "isHidden": nil}}, false},
+		{"null favorite person", []any{assigned(map[string]any{"id": "person", "name": "", "isFavorite": nil})}, []any{map[string]any{"id": "person", "name": "", "isFavorite": nil}}, false},
+		{"invalid thumbnail metadata", []any{assigned(map[string]any{"id": "person", "name": "", "thumbnailPath": map[string]any{}})}, []any{map[string]any{"id": "person", "name": "", "thumbnailPath": map[string]any{}}}, false},
+		{"invalid updated metadata", []any{assigned(map[string]any{"id": "person", "name": "", "updatedAt": []any{}})}, []any{map[string]any{"id": "person", "name": "", "updatedAt": []any{}}}, false},
+		{"inconsistent thumbnail metadata", []any{assigned(map[string]any{"id": "person", "name": "", "thumbnailPath": "/face.jpg"})}, []any{map[string]any{"id": "person", "name": "", "thumbnailPath": "/person.jpg"}}, false},
+		{"inconsistent updated metadata", []any{assigned(map[string]any{"id": "person", "name": "", "updatedAt": "2026-10-31T00:00:00Z"})}, []any{map[string]any{"id": "person", "name": "", "updatedAt": "2026-10-30T00:00:00Z"}}, false},
+		{"inconsistent metadata across faces", []any{assigned(map[string]any{"id": "person", "name": "", "thumbnailPath": "/a.jpg"}), assigned(unnamed), assigned(map[string]any{"id": "person", "name": "", "thumbnailPath": "/b.jpg"})}, people, false},
+		{"hidden person", []any{assigned(map[string]any{"id": "person", "name": "", "isHidden": true})}, []any{map[string]any{"id": "person", "name": "", "isHidden": true}}, false},
+		{"favorite person", []any{assigned(map[string]any{"id": "person", "name": "", "isFavorite": true})}, []any{map[string]any{"id": "person", "name": "", "isFavorite": true}}, false},
+		{"birth date person", []any{assigned(map[string]any{"id": "person", "name": "", "birthDate": "2000-01-01"})}, []any{map[string]any{"id": "person", "name": "", "birthDate": "2000-01-01"}}, false},
+		{"color person", []any{assigned(map[string]any{"id": "person", "name": "", "color": "#ffffff"})}, []any{map[string]any{"id": "person", "name": "", "color": "#ffffff"}}, false},
+		{"shared person", []any{assigned(map[string]any{"id": "person", "name": "", "sharedWith": []any{map[string]any{"id": "user"}}})}, []any{map[string]any{"id": "person", "name": "", "sharedWith": []any{map[string]any{"id": "user"}}}}, false},
+		{"unknown person metadata", []any{assigned(map[string]any{"id": "person", "name": "", "manualLabel": "keep"})}, []any{map[string]any{"id": "person", "name": "", "manualLabel": "keep"}}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -511,6 +556,46 @@ func TestFaceSafety(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticSourceFacesAllowPublicationAndRetirementWithOutputFaces(t *testing.T) {
+	f, c := newFixture(t)
+	person := map[string]any{"id": "person", "name": "", "isHidden": false}
+	f.locked(func() {
+		f.people = []any{person}
+		f.faces = []any{map[string]any{"sourceType": "machine-learning", "personId": nil, "person": person}}
+		f.outputPeople = []any{map[string]any{"id": "output-person", "name": "", "isHidden": false}}
+	})
+	ctx := context.Background()
+	r, e := c.Publish(ctx, f.input, f.checkpoint)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Retire(ctx, f.input, r, true); e != nil {
+		t.Fatal(e)
+	}
+	if !f.wasTrashed() {
+		t.Fatal("automatic unnamed source faces blocked retirement")
+	}
+}
+
+func TestCanReleaseOutputIgnoresOutputPeople(t *testing.T) {
+	f, c := newFixture(t)
+	in := f.input
+	in.OutputAssetID = "output"
+	f.locked(func() {
+		f.meta = provenance(in)
+		f.outputPeople = []any{map[string]any{"id": "output-person", "name": ""}}
+	})
+	if e := c.CanReleaseOutput(context.Background(), in); e != nil {
+		t.Fatal(e)
+	}
+	for _, request := range f.requestList() {
+		if strings.HasPrefix(request, "GET /api/faces") {
+			t.Fatalf("GC audited output faces: %s", request)
+		}
+	}
+}
+
 func TestFaceAddedAfterPublishBlocksRetirement(t *testing.T) {
 	f, c := newFixture(t)
 	ctx := context.Background()

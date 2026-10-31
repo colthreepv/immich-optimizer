@@ -187,8 +187,148 @@ func guard(a asset, in Input) error {
 	if a.Type != "IMAGE" {
 		return blocked("only still images are supported")
 	}
-	if len(a.People) > 0 {
-		return blocked("person relationships cannot be proven migrated")
+	return nil
+}
+
+var automaticPersonFields = map[string]bool{
+	"id": true, "name": true, "birthDate": true, "thumbnailPath": true,
+	"isHidden": true, "updatedAt": true, "isFavorite": true, "color": true,
+	"otherPeople": true, "sharedBy": true, "sharedWith": true,
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return len(raw) > 0 && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func jsonString(raw json.RawMessage) (string, bool) {
+	var value string
+	if isJSONNull(raw) || json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
+}
+
+type automaticPerson struct {
+	id, thumbnailPath, updatedAt   string
+	hasThumbnailPath, hasUpdatedAt bool
+}
+
+func (p automaticPerson) compatibleWith(other automaticPerson) bool {
+	return p.id == other.id &&
+		(!p.hasThumbnailPath || !other.hasThumbnailPath || p.thumbnailPath == other.thumbnailPath) &&
+		(!p.hasUpdatedAt || !other.hasUpdatedAt || p.updatedAt == other.updatedAt)
+}
+
+func unnamedAutomaticPerson(raw json.RawMessage) (automaticPerson, error) {
+	var person automaticPerson
+	var fields map[string]json.RawMessage
+	if e := json.Unmarshal(raw, &fields); e != nil || fields == nil {
+		return person, blocked("invalid person")
+	}
+	for field := range fields {
+		if !automaticPersonFields[field] {
+			return person, blocked("unknown person metadata")
+		}
+	}
+	idRaw, idOK := fields["id"]
+	nameRaw, nameOK := fields["name"]
+	id, idValid := jsonString(idRaw)
+	name, nameValid := jsonString(nameRaw)
+	if !idOK || !idValid || id == "" || !nameOK || !nameValid || name != "" {
+		return person, blocked("person is named or malformed")
+	}
+	person.id = id
+	for _, field := range []string{"birthDate", "color"} {
+		if value, ok := fields[field]; ok && !isJSONNull(value) {
+			return person, blocked("person has manual metadata")
+		}
+	}
+	for _, field := range []string{"isHidden", "isFavorite"} {
+		if value, ok := fields[field]; ok {
+			var flag bool
+			if isJSONNull(value) || json.Unmarshal(value, &flag) != nil || flag {
+				return person, blocked("person has manual metadata")
+			}
+		}
+	}
+	for _, field := range []string{"thumbnailPath", "updatedAt"} {
+		if value, ok := fields[field]; ok {
+			text, valid := jsonString(value)
+			if !valid {
+				return person, blocked("invalid automatic person metadata")
+			}
+			if field == "thumbnailPath" {
+				person.thumbnailPath, person.hasThumbnailPath = text, true
+			} else {
+				person.updatedAt, person.hasUpdatedAt = text, true
+			}
+		}
+	}
+	for _, field := range []string{"otherPeople", "sharedBy", "sharedWith"} {
+		if value, ok := fields[field]; ok {
+			var entries []json.RawMessage
+			if isJSONNull(value) || json.Unmarshal(value, &entries) != nil || len(entries) != 0 {
+				return person, blocked("person has sharing metadata")
+			}
+		}
+	}
+	return person, nil
+}
+
+func validateAutomaticPeople(a asset, faces []json.RawMessage) error {
+	people := map[string]automaticPerson{}
+	for _, raw := range a.People {
+		person, e := unnamedAutomaticPerson(raw)
+		if e != nil {
+			return e
+		}
+		if _, exists := people[person.id]; exists {
+			return blocked("duplicate asset person %s", person.id)
+		}
+		people[person.id] = person
+	}
+	facePeople := map[string]automaticPerson{}
+	for _, raw := range faces {
+		var face struct {
+			SourceType string          `json:"sourceType"`
+			Person     json.RawMessage `json:"person"`
+			PersonID   json.RawMessage `json:"personId"`
+		}
+		if e := json.Unmarshal(raw, &face); e != nil || face.SourceType != "machine-learning" || len(face.Person) == 0 || (len(face.PersonID) != 0 && string(face.PersonID) != "null") {
+			return blocked("face is manual, assigned, or cannot be classified")
+		}
+		if string(face.Person) == "null" {
+			continue
+		}
+		person, e := unnamedAutomaticPerson(face.Person)
+		if e != nil {
+			return e
+		}
+		assetPerson, ok := people[person.id]
+		if !ok {
+			return blocked("face person %s missing from asset people", person.id)
+		}
+		if !assetPerson.compatibleWith(person) {
+			return blocked("face person %s inconsistent with asset people", person.id)
+		}
+		if previous, ok := facePeople[person.id]; ok {
+			if !previous.compatibleWith(person) {
+				return blocked("face person %s has inconsistent metadata", person.id)
+			}
+			if person.hasThumbnailPath {
+				previous.thumbnailPath, previous.hasThumbnailPath = person.thumbnailPath, true
+			}
+			if person.hasUpdatedAt {
+				previous.updatedAt, previous.hasUpdatedAt = person.updatedAt, true
+			}
+			person = previous
+		}
+		facePeople[person.id] = person
+	}
+	for id := range people {
+		if _, ok := facePeople[id]; !ok {
+			return blocked("asset person %s missing from faces", id)
+		}
 	}
 	return nil
 }
@@ -228,15 +368,8 @@ func (c *Client) original(ctx context.Context, in Input) (asset, error) {
 	if faces == nil {
 		return a, blocked("invalid face response")
 	}
-	for _, raw := range faces {
-		var face struct {
-			SourceType string          `json:"sourceType"`
-			Person     json.RawMessage `json:"person"`
-			PersonID   json.RawMessage `json:"personId"`
-		}
-		if e = json.Unmarshal(raw, &face); e != nil || face.SourceType != "machine-learning" || string(face.Person) != "null" || (len(face.PersonID) != 0 && string(face.PersonID) != "null") {
-			return a, blocked("face is manual, assigned, or cannot be classified")
-		}
+	if e = validateAutomaticPeople(a, faces); e != nil {
+		return a, e
 	}
 	albums, e := c.albums(ctx, in.OriginalAssetID)
 	if e != nil {
