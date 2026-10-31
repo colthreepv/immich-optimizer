@@ -78,7 +78,7 @@ If using Docker, remember to mount a folder containing the `tasks.yaml` configur
 ```yaml
 services:
   immich-optimizer:
-    image: ghcr.io/miguelangel-nubla/immich-optimizer:latest
+    image: ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.6
     environment:
       - IUO_IMMICH_URL=http://immich-server:2283
       - IUO_IMMICH_API_KEY=your-api-key

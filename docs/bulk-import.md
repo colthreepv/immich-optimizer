@@ -128,7 +128,7 @@ After parent review, stop/drain the current importer and resume the same command
 and state directory with this additional explicit option:
 
 ```powershell
---converter-script 'C:\Users\valerio\projects\public\immich-optimizer\scripts\storage-saver\import-camera-convert.sh'
+--converter-script 'C:\Users\valerio\projects\valerio\immich-optimizer\scripts\storage-saver\import-camera-convert.sh'
 ```
 
 The importer mounts that file read-only at `/converter.sh` and invokes it through
@@ -148,7 +148,7 @@ Evidence: `immich-experiments\import-batch-profile\paired-timings.json`.
 Run the 46 metadata validator cases in the existing image:
 
 ```powershell
-docker run --rm --network none --mount 'type=bind,source=C:\Users\valerio\projects\public\immich-optimizer,target=/repo,readonly' colthreepv/immich-optimizer:storage-saver-ccc6b3e bash /repo/scripts/storage-saver/import-camera-convert.test.sh
+docker run --rm --network none --mount 'type=bind,source=C:\Users\valerio\projects\valerio\immich-optimizer,target=/repo,readonly' colthreepv/immich-optimizer:storage-saver-ccc6b3e bash /repo/scripts/storage-saver/import-camera-convert.test.sh
 ```
 
 The cases include altered/missing date, offset, GPS and ICC, every EXIF

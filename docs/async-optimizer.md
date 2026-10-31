@@ -1,10 +1,10 @@
 # Async optimizer
 
-This describes the original-first path under development. It is intended for a single Immich owner, with one server and a pull worker. It does not import existing libraries or ledger entries in bulk.
+This describes the experimental original-first path. It is intended for a single Immich owner, with one server and a pull worker. It does not import existing libraries or ledger entries in bulk.
 
-Original-first is opt-in; the existing storage-saver mode remains available. The Carlino deployment sets `IUO_ORIGINAL_FIRST=true`. The initial phone gate is a read-only check of settings and sync behavior. Keep `IUO_RETIRE_ORIGINAL` disabled until phone validation is complete. Before enabling it, turn off Sync Remote Deletions on every phone. In Immich Android 3.3.4, this setting is under Advanced. The server does not enforce the phone setting.
+Original-first is opt-in; the existing storage-saver mode remains available. Set `IUO_ORIGINAL_FIRST=true` to enable it. The initial phone gate is a read-only check of settings and sync behavior. Keep `IUO_RETIRE_ORIGINAL` disabled until phone validation is complete. Before enabling it, turn off Sync Remote Deletions on every phone. In Immich Android 3.3.4, this setting is under Advanced. The server does not enforce the phone setting.
 
-The release image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.3`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
+The release image is `ghcr.io/colthreepv/immich-optimizer:v0.4.0-rc.6`. Its default command is `immich-optimizer`. Override the command with `optimizer-worker` for the worker. Both commands use the same image.
 
 ## Release
 
@@ -13,10 +13,10 @@ Create and push a new version tag, then publish its GitHub prerelease. The workf
 If no automatic run appears and no run or image already exists for the tag, dispatch the workflow on that exact tag:
 
 ```sh
-gh workflow run release.yaml -R colthreepv/immich-optimizer --ref v0.4.0-rc.4
+gh workflow run release.yaml -R colthreepv/immich-optimizer --ref v0.4.0-rc.7
 ```
 
-Replace the example tag with the new release's tag. The RC3 manual run has already started; do not dispatch it again. Wait for validation and the image build to pass, then verify the tagged GHCR image is available before deploying. If a run is already in progress or the image exists, do not dispatch or republish that version to rebuild it; use a new version for another build.
+Replace the example tag with the new release's tag. Do not dispatch a version whose image has already been published. Wait for validation and the image build to pass, then verify the tagged GHCR image is available before deploying. If a run is already in progress or the image exists, do not dispatch or republish that version to rebuild it; use a new version for another build.
 
 ## Configuration
 
@@ -36,9 +36,11 @@ Server settings for original-first mode:
 | `IUO_MOBILE_VIEW=true` | Enable the experimental original-checksum view. |
 | `IUO_RETIRE_ORIGINAL` | Allow worker claims and verified original retirement. Defaults to `false`. |
 | `IUO_QUEUE_MAX_JOBS` | Historical job admission limit. Default `10000`. |
-| `IUO_QUEUE_MAX_SPOOL_BYTES` | Spool admission limit in bytes. Default `107374182400` (100 GiB). |
+| `IUO_QUEUE_MAX_SPOOL_BYTES` | Spool admission limit, e.g. `100GiB`, `1.5GiB`, or integer bytes. Default `100GiB`. |
 
 The image supplies the storage-saver tasks file. The server needs access to Immich and a writable persistent state directory. The worker API is separate from the public proxy; make it reachable by authorized workers.
+
+The `-queue_max_spool_bytes` flag accepts the same sizes and overrides the environment value. Units are case-insensitive: `KiB/MiB/GiB/TiB` and bare `K/M/G/T` use powers of 1024; `KB/MB/GB/TB` use powers of 1000. Fractional sizes are accepted only when they resolve to an exact whole number of bytes. Existing integer-byte configurations remain valid. The flag value `0` keeps the built-in default; an explicitly configured environment value must be positive.
 
 Worker settings:
 

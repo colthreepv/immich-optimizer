@@ -105,7 +105,7 @@ func parseConfig(args []string) (*entity.AppConfig, bool, error) {
 		}
 	}
 	fs.BoolVar(&ac.RetireOriginal, "retire_original", retireOriginal, "Trash originals after verified replacement and metadata migration")
-	maxSpoolBytes, err := optionalIntEnv("IUO_QUEUE_MAX_SPOOL_BYTES")
+	maxSpoolBytes, err := optionalByteSizeEnv("IUO_QUEUE_MAX_SPOOL_BYTES")
 	if err != nil {
 		return nil, false, err
 	}
@@ -116,7 +116,14 @@ func parseConfig(args []string) (*entity.AppConfig, bool, error) {
 	if int64(int(maxJobs)) != maxJobs {
 		return nil, false, fmt.Errorf("IUO_QUEUE_MAX_JOBS exceeds platform integer range")
 	}
-	fs.Int64Var(&ac.QueueMaxSpoolBytes, "queue_max_spool_bytes", maxSpoolBytes, "Queue spool byte limit (0 uses default)")
+	ac.QueueMaxSpoolBytes = maxSpoolBytes
+	fs.Func("queue_max_spool_bytes", "Queue spool limit in bytes or units, e.g. 100GiB (0 uses default)", func(value string) error {
+		parsed, err := parseByteSize(value)
+		if err == nil {
+			ac.QueueMaxSpoolBytes = parsed
+		}
+		return err
+	})
 	fs.IntVar(&ac.QueueMaxJobs, "queue_max_jobs", int(maxJobs), "Queue job limit (0 uses default)")
 	fs.StringVar(&ac.WorkerBindAddr, "worker_bind_addr", envOr("IUO_WORKER_BIND_ADDR", ":8082"), "Address for the worker API")
 	fs.StringVar(&ac.PresetID, "preset_id", envOr("IUO_PRESET_ID", "avif-q50-s6-420-v1"), "Versioned conversion preset identifier")
