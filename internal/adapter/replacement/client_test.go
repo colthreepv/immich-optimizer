@@ -23,6 +23,7 @@ import (
 type fixture struct {
 	mu                                                                                        sync.Mutex
 	sourceMeta, targetMeta                                                                    map[string]map[string]any
+	sourceExif, outputExif                                                                    map[string]any
 	outputOwner                                                                               string
 	linkAssets                                                                                []string
 	linkPreview                                                                               string
@@ -73,7 +74,15 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 		if id == "original" {
 			size = f.input.SourceSize
 		}
-		return map[string]any{"id": id, "ownerId": "owner", "checksum": base64.StdEncoding.EncodeToString(raw), "type": "IMAGE", "visibility": "timeline", "width": 640, "height": 480, "fileCreatedAt": "2024-01-01T00:00:00Z", "fileModifiedAt": "2024-01-01T00:00:00Z", "exifInfo": map[string]any{"description": "hello", "fileSizeInByte": size}}
+		exif := map[string]any{"description": "hello", "fileSizeInByte": size}
+		extra := f.outputExif
+		if id == "original" {
+			extra = f.sourceExif
+		}
+		for k, v := range extra {
+			exif[k] = v
+		}
+		return map[string]any{"id": id, "ownerId": "owner", "checksum": base64.StdEncoding.EncodeToString(raw), "type": "IMAGE", "visibility": "timeline", "width": 640, "height": 480, "fileCreatedAt": "2024-01-01T00:00:00Z", "fileModifiedAt": "2024-01-01T00:00:00Z", "exifInfo": exif}
 	}
 	switch r.Method + " " + r.URL.Path {
 	case "GET /api/users/me":

@@ -771,6 +771,9 @@ func (c *Client) verifyRelations(ctx context.Context, in Input, id string) error
 	}
 	for _, k := range migratedExifFields {
 		if v, ok := a.Exif[k]; ok && v != nil && !reflect.DeepEqual(v, b.Exif[k]) {
+			if k == "timeZone" && equivalentCaptureTimeZone(a.Exif, b.Exif) {
+				continue
+			}
 			return blocked("metadata mismatch: %s", k)
 		}
 	}
